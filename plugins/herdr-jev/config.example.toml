@@ -35,8 +35,19 @@ log_decisions = true
 # ---------------------------------------------------------------------------
 # Per agent kind, because claude/codex/gemini name their models differently.
 # The decision model never sees any of these names — it ranks the WORK.
-# `herdr-jev doctor` prints every mapping in effect: a vendor renaming a flag
-# produces an agent that is silently never routed.
+#
+# THESE ARE GUESSES. Herdr's kind enum is verified; these model names and flags
+# are not. Vendors rename both without asking us, and the failure is invisible:
+# herdr-jev logs a confident decision, builds --model gpt-5-mini, and the binary
+# ignores it. Every other failure here degrades into pass-through; this one
+# degrades into a lie.
+#
+#   herdr-jev doctor --probe
+#
+# reads each agent's own --help and reports ok / FAIL / ?? per mapping. It never
+# edits this file — an auto-fix guessing a replacement name would reintroduce the
+# same error with more confidence. Probing is a check, not a gate: routing works
+# whether or not it has ever been run.
 # ---------------------------------------------------------------------------
 [agents.claude]
 tiers        = { fast = "haiku", balanced = "sonnet", deep = "opus" }

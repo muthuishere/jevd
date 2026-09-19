@@ -116,6 +116,21 @@ description = "Herdr reachable, openjev discovered and ready, api version, confi
 command = ["./bin/herdr-jev", "doctor"]
 contexts = ["global", "pane"]
 
+# The tier and flag mappings are guesses against vendor CLIs we have not verified, and a
+# vendor renaming a flag is the one failure that degrades into a LIE rather than into
+# pass-through: a confident log line above arguments the agent silently ignores. This
+# reads each agent binary's own --help and reports ok / FAIL / ?? per mapping.
+#
+# A separate action rather than part of doctor, because it runs other people's binaries:
+# plain doctor stays fast and offline, and this is never implied. It reports only — it
+# never edits config, and routing works whether or not it has ever been run.
+[[actions]]
+id = "jev:probe"
+title = "Verify the model mappings against the real agent binaries"
+description = "Read each agent's own --help and report which flags and models it truly accepts"
+command = ["./bin/herdr-jev", "doctor", "--probe"]
+contexts = ["global"]
+
 [[actions]]
 id = "jev:status"
 title = "herdr-jev status"

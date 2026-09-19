@@ -188,6 +188,19 @@ Shape detection rules, each with its failure:
 - **Every detection carries its reason.** "Why was my question not answered locally?"
   must be answerable without reading the source.
 
+The gate is guarded by a **corpus of ~45 real developer prompts** spanning both classes,
+weighted towards the generative half, which is the one that must never pass. Ad-hoc cases
+test the rules you already thought of; the corpus is there for the rules you did not — it
+is how the `change` noun/verb bug was fixed and how the missing `profile` verb was found.
+
+Its companion table, `knownConservativeVetoes`, is the **honest list of what the gate
+gives up**: genuinely decision-shaped questions ("Can herdr change a running agent's
+model?") that are vetoed because a generative verb appears in them as an ordinary word.
+Separating "can herdr change X" from "can you change X" needs grammar this gate does not
+have, and the fragile heuristics that would fake it are precisely how a false PASS
+eventually slips through. One wasted agent call per entry is the right side of that trade,
+and writing them down beats tolerating them quietly.
+
 ### 4.3 The answer bar — why 0.85
 
 `answer.min_confidence`, default **0.85**, and it is **separate from and higher than**
@@ -277,8 +290,17 @@ bar.**
 **Both directions, both dimensions.** A task read as mechanical routes down; one read as
 hard routes up — model and effort alike.
 
-Unlike the Claude Code mod, **both switches default on**: we choose at process START, so
-there is no prompt cache to invalidate and no reason to keep the model switch off.
+**Both switches default on, and that differs from the reference on purpose.** The Claude
+Code mod ships `routeMainModel` **off**, because it rewrites the model of a conversation
+that is already running: a mid-session switch invalidates the prompt cache, and on a long
+context re-caching can cost more than the cheaper tier saves. **That reason does not apply
+to us.** We choose the model before the agent process exists (§3), so there is no cache to
+invalidate and nothing to re-pay. Turning `route_model` off here would forgo the entire
+model-routing feature to avoid a cost we do not incur.
+
+Do not "restore" the reference's default. If a future version ever gains the ability to
+change a running agent's model, the trade-off returns and this paragraph is the thing to
+revisit.
 
 ### 6.1 It never blocks
 
@@ -375,6 +397,47 @@ margin = 0.10
 keep = 500
 ```
 
+### 8.1 The shipped agent mappings are GUESSES, and they rot
+
+Stated plainly because the alternative is someone discovering it.
+
+Herdr's 23-kind enum is verified against a live server. **The model names and flags under
+`[agents.*]` are not.** They are best-effort defaults, written against vendor CLIs at one
+moment in time, and vendors rename models and flags without asking us.
+
+**The failure is invisible in the worst possible way.** Nothing errors. herdr-jev
+classifies the task, logs a confident two-line decision, builds `--model gpt-5-mini`, and
+hands it to a binary that ignores or rejects the flag. The transcript says it routed; the
+agent ran on its default. Every other failure in this plugin degrades loudly into
+pass-through — this one degrades into a **lie**.
+
+So:
+
+- `doctor` prints every mapping in effect, and reports the whole table as **UNVERIFIED**
+  until it has been probed.
+- **`doctor --probe`** reads each agent binary's own `--help` and reports what it really
+  accepts. Opt-in, bounded, and three-state:
+
+  | state | meaning |
+  |---|---|
+  | `ok` | the binary documents that flag, or names that model |
+  | `FAIL` | the binary's help exists and does **not** document the flag — arguments built with it would be ignored |
+  | `??` | **could not be verified here**: no binary on PATH, it timed out, or its help does not settle the question |
+
+  `??` is never rendered as a pass. A mapping nobody could verify must read differently
+  from a verified one, or the probe hands back exactly the false confidence it was built
+  to remove. Model names are `??` rather than `FAIL` when absent from the help, because
+  help text lists flags and almost never enumerates models — "not mentioned" is not
+  evidence of refusal.
+
+- The probe reads `--help`; it never tries the flag for real. For several of these
+  binaries `<bin> --model x` starts an interactive agent or opens a session that costs
+  tokens, and a check that might launch an agent is a check nobody runs.
+- **It reports; it never edits config.** An auto-fix guessing a replacement model name
+  would reintroduce this exact class of error with more confidence behind it.
+- **Probing is never required to route.** It is a check, not a gate. A mapping that has
+  never been probed still routes.
+
 Remote backends (TypeSafe's API, the Vercel AI Gateway) are a **fallback**, configured
 and off. Choosing to send task text off the machine must be an explicit act.
 
@@ -388,7 +451,7 @@ herdr-jev dispatch "…" --dry-run --explain               # decide, start nothi
 herdr-jev ask "is the build green?"                      # short circuit only
 herdr-jev classify "<task>"                              # raw tier/effort/risky
 herdr-jev why [n] · savings · status [--watch] · feed
-herdr-jev doctor [--json] · skill [--install]
+herdr-jev doctor [--json] [--probe] · skill [--install]
 herdr-jev route "<message>" · panes [--distilled] · hold list · resolve <id> --to <n>
 ```
 
@@ -449,6 +512,10 @@ require a rebuild.
 - `risky 0.95` on a session already at `xhigh` does **not** lower it.
 - openjev dead / slow / api v2 → the task is dispatched unchanged and `doctor` says why.
 - openjev downloading → `status` says **downloading, with bytes and ETA**.
+- Every prompt in the generative corpus is vetoed; every one in the decision corpus is
+  recognised.
+- `doctor --probe` reports ACCEPTED / REJECTED / `??` per mapping, never renders `??` as a
+  pass, never edits config, and is bounded by its timeout even against a binary that hangs.
 - `go vet ./...`, `go build ./...` and `go test ./...` clean.
 
 ## 12. Out of scope

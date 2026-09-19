@@ -72,6 +72,28 @@ started, never mid-session**. A long session on the wrong tier stays there; the 
 new pane. [ADR 0007](docs/adr/0007-route-at-agent-start-not-mid-session.md) is explicit
 about this rather than implying more.
 
+## The mappings are guesses — verify them
+
+Herdr's agent-kind enum is verified against a live server. The model names and flags under
+`[agents.*]` are **not**: they are best-effort defaults against vendor CLIs that rename
+things without asking. The failure is invisible — the plugin logs a confident decision,
+builds `--model gpt-5-mini`, and the binary ignores it. Every other failure here degrades
+into pass-through; this one degrades into a lie.
+
+```console
+$ herdr-jev doctor --probe
+ok    probe claude model_flag      claude documents --model
+ok    probe claude tiers.deep      opus appears in claude's own help
+??    probe claude tiers.fast      haiku is not named in claude's help, which usually lists flags but not models
+                                     -> confirm `claude --model haiku` is accepted; if the vendor renamed it, set tiers.fast under [agents.claude]
+??    probe gemini binary          gemini is not on PATH, so nothing about this kind can be verified here
+
+?? = could not be verified here. Not a pass.
+```
+
+Opt-in, bounded, three-state, and it **reports only** — it never edits your config, and
+routing works whether or not it has ever been run.
+
 ## Design
 
 [`SPEC.md`](SPEC.md) is the build contract. The ADRs carry the arguments:
