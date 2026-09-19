@@ -1,0 +1,50 @@
+# The built-in model registry. THE ONLY PLACE IN THE SOURCE THAT NAMES A MODEL.
+#
+# Merged by id with $XDG_CONFIG_HOME/openjev/models.toml; the user file wins, field by
+# field is NOT supported — an override replaces the whole entry, because a half-overridden
+# entry (new repo, old sha256) is a trap.
+#
+# `revision` is a commit sha, never a branch. A branch here earns a startup warning.
+
+[models."openjev-4b-nli-v2"]
+default   = true
+repo      = "AlexWortega/openjev"
+revision  = "main"                 # TODO(publish): pin to a commit sha before 0.1.0 ships
+subfolder = "qwen3.5-4b-nli-v2"
+arch      = "qwen3_5"
+task      = "sequence-classification"
+template  = "Premise: {premise}\nHypothesis: {hypothesis}"
+labels    = ["contradiction", "entailment", "neutral"]
+entailment_label = "entailment"
+context   = 8192
+modalities = ["text"]
+hidden_size = 2560
+
+[models."openjev-4b-nli-v2".tokenizer]
+repo = "AlexWortega/openjev"
+file = "qwen3.5-4b-nli-v2/tokenizer.json"
+pad_token_id = 248044
+padding_side = "left"
+
+[models."openjev-4b-nli-v2".head]
+kind = "linear"
+in_features = 2560
+out_features = 3
+bias = false
+tensor = "score.weight"
+repo = "muthuishere/openjev-gguf"
+file = "openjev-4b-nli-v2/score.safetensors"
+
+[models."openjev-4b-nli-v2".backends.llamacpp]
+requires = ["qwen3_5-hybrid"]
+dtype_label = "q5_k_m"
+# Pinned llama.cpp release. The ABI mirror in backends/llamacpp/ffi.rs is valid for
+# EXACTLY this tag; bumping one without the other is a silent memory-layout corruption,
+# so the loader refuses to run against a different tag.
+native_release = "b11054"
+
+[models."openjev-4b-nli-v2".backends.llamacpp.weights]
+repo = "muthuishere/openjev-gguf"
+file = "openjev-4b-nli-v2-Q5_K_M.gguf"
+sha256 = ""                        # TODO(publish): fill at publish time; empty = unpinned
+size_bytes = 2_900_000_000
