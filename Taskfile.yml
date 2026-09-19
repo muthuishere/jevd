@@ -1,0 +1,81 @@
+version: '3'
+
+# The engine and the plugin build with different toolchains and are released on
+# different clocks, so nothing here builds "everything" by default. `task check`
+# is what CI runs and what you run before pushing.
+
+vars:
+  PLUGIN: plugins/herdr-jev
+
+tasks:
+  default:
+    cmds: [task: check]
+
+  check:
+    desc: Everything CI runs — fast, and never compiles llama.cpp
+    cmds:
+      - task: rust:fmt
+      - task: rust:clippy
+      - task: rust:test
+      - task: go:vet
+      - task: go:test
+
+  # --- rust -----------------------------------------------------------------
+  # The default feature set deliberately excludes every llama.cpp backend: the
+  # sys crate builds llama.cpp from a pinned submodule via cmake, which turns a
+  # 20-second check into a multi-minute one. Backends are exercised by
+  # `task rust:build:metal` / `:cuda` and by the release matrix, not by `check`.
+
+  rust:fmt:
+    desc: Formatting, checked not applied
+    cmds: ['cargo fmt --all -- --check']
+
+  rust:fix:
+    desc: Apply formatting
+    cmds: ['cargo fmt --all']
+
+  rust:clippy:
+    cmds: ['cargo clippy --workspace --all-targets -- -D warnings']
+
+  rust:test:
+    desc: Unit tests. No weights, no network, no GPU
+    cmds: ['cargo test --workspace']
+
+  rust:build:
+    cmds: ['cargo build --workspace --release']
+
+  rust:build:metal:
+    desc: Release binary with the Metal backend (macOS; compiles llama.cpp)
+    cmds: ['cargo build --release -p openjev-cli --features metal']
+
+  rust:build:cuda:
+    desc: Release binary with the CUDA backend (needs nvcc; compiles llama.cpp)
+    cmds: ['cargo build --release -p openjev-cli --features cuda']
+
+  # --- go -------------------------------------------------------------------
+  go:build:
+    dir: '{{.PLUGIN}}'
+    cmds: ['./scripts/build.sh']
+
+  go:vet:
+    dir: '{{.PLUGIN}}'
+    cmds: ['go vet ./...']
+
+  go:test:
+    dir: '{{.PLUGIN}}'
+    cmds: ['go test ./...']
+
+  # --- dev ------------------------------------------------------------------
+  serve:
+    desc: Run the server from source
+    cmds: ['cargo run -p openjev-cli -- serve {{.CLI_ARGS}}']
+
+  plugin:link:
+    desc: Register this checkout with herdr for development
+    dir: '{{.PLUGIN}}'
+    cmds:
+      - ./scripts/build.sh
+      - herdr plugin link "$(pwd)"
+
+  plugin:unlink:
+    cmds: ['herdr plugin unlink dev.deemwar.herdr-jev']

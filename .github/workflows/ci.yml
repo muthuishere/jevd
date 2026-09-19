@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A push while CI is still running means the older run is answering a question
+# nobody is asking any more.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    # Default features only: no llama.cpp backend is compiled here. Building the
+    # sys crate means cmake-ing llama.cpp from a pinned submodule, which belongs
+    # in the release matrix, not on every push.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  go:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/herdr-jev
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: plugins/herdr-jev/go.sum
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go build ./...

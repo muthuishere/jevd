@@ -1,0 +1,4 @@
+/target
+plugins/herdr-jev/bin/
+*.log
+.DS_Store
