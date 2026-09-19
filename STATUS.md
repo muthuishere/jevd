@@ -18,6 +18,7 @@ openjev runs the real checkpoint, and its answers match the reference implementa
 | pooled hidden state, relL2 vs reference (Q8_0) | 5.8e-3 – 6.3e-3 |
 | mixed-length batch vs the same pairs alone | **0.0000e0** |
 | recurrent-state leak after a 1024-token distractor | **0.000e0** (bit-identical, on Metal) |
+| same, *within one batched decode*, both orders | **0.000e0** at every distractor length |
 | all-zero hidden states (ADR 0003 guard) | none, on any pair |
 
 The whole product path is exercised, not just the library: `openjev predict/rerank/grade`
@@ -60,6 +61,9 @@ Q8_0, Metal, M5 Pro, warm, one worker, `tests/bench.rs`:
 
 Inside the 8–18 pairs/s band the earlier estimate predicted for a 4B. Cost is roughly
 **50 ms fixed + 0.45 ms/token**.
+
+CPU (same Q8_0, all cores): **2.3 pairs/s** at 32 tokens, 0.3 at 512 — 7x and 13x slower
+than Metal. CPU is a fallback, not a deployment target. CUDA and Vulkan remain unexercised.
 
 **Quantisation does not buy speed** — pairs/s, same machine, warm:
 
@@ -165,6 +169,14 @@ All three passed every weightless test, because weightless tests cannot see them
 Plus: the server ranked by `unwrap_or(0)` when the entailment label was missing, silently
 reversing the ranking to P(contradiction); and the startup banner printed `llama-cpp-2
 0.1.0`, a version that crate has never had.
+
+**And a fourth, from a different direction: `context >= 32768` SIGSEGVs on Metal.** Bisected
+— 28672 fine, 32768 and 65536 dead, CPU fine at all of them, so it is a ggml-metal
+allocation ceiling and not a model limit. `context` is user-editable registry data, so the
+config surface itself invites the value that kills the process, with no error and no log.
+openjev now refuses before allocating and names the value, the ceiling, the device, the
+config key and `--device cpu`. It cannot be probed: the failure is a segfault, not an error
+return, so there is no process left to report it. (ADR 0016)
 
 ## Still not proven
 

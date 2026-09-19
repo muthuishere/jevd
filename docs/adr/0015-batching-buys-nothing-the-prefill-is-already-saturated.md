@@ -41,15 +41,36 @@ pairs is 2 TFLOP and takes 465 ms — the same rate. The hardware was never wait
 
 ## Decision
 
-**The batching code stays, and `server.max_seqs` stays at 1.**
+**The batching code stays, `Caps::BATCH` stays, and `server.max_seqs` stays at 1.**
 
-It stays because it is correct — at `max_seqs=16` the whole golden suite passes with
-results identical to the unbatched path, including a mixed-length batch that differs by
-exactly `0.0000e0`, which is a real proof that llama.cpp keeps a separate gated-DeltaNet
-state per `seq_id`. That is a fact worth owning, and it is what any future backend or a
-faster llama.cpp would need.
+Correct-but-pointless code that carries a silent-wrong-answer risk is a bad trade, so the
+keep/delete question deserves an argument rather than a shrug.
 
-It defaults to 1 because it costs KV budget and returns nothing measurable today.
+**The risk is real and specific.** ADR 0001 measured the recurrent-state leak with exactly
+one sequence per `llama_decode`, and named batched sequences as the single condition that
+would reopen it. Several sequences sharing one context is exactly that condition. A leak
+there is a confident wrong label, not a crash.
+
+**It is now measured, and asserted.** Target second in a shared decode behind distractors
+of 8 / 64 / 256 / 1024 tokens: `relL2 0.000e0`, every length. Target first, distractor
+after: `0.000e0`. Four identical copies in one call: `0.000e0` against each other and
+against the standalone result. Plus a mixed-length batch of real pairs through the whole
+golden suite, also `0.0000e0`. Two tests now carry this —
+`recurrent_state_does_not_leak_within_one_batched_decode` for state leakage and
+`a_mixed_length_batch_agrees_with_the_same_pairs_alone` for padding and pooling — so the
+property is coverage, not folklore.
+
+**So it stays**, because with those assertions in place the residual risk is a regression
+that two tests would catch, and what is bought is a proven-correct multi-sequence path that
+a faster runtime, a smaller trunk or a bigger GPU could switch on with one config key. The
+cost of keeping it is those two tests, which had to exist anyway — R2 does not stop
+mattering just because batching is off.
+
+**It defaults to 1** because it costs KV budget and returns nothing measurable today.
+
+**It should be deleted if** the tests ever have to be weakened to keep it green, or if a
+year passes with no workload where it wins. Either would mean the price stopped being paid
+and the code became decoration.
 
 ## Consequences
 

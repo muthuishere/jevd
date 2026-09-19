@@ -180,6 +180,79 @@ fn recurrent_state_does_not_leak_between_sequences() {
     }
 }
 
+/// **R2, reopened by batching.** ADR 0001 measured the leak with exactly one sequence per
+/// `llama_decode`. Multi-sequence decode (`Caps::BATCH`, ADR 0015) puts several sequences
+/// in one call sharing one context, and that is precisely the condition ADR 0001 named as
+/// the one that would reopen the question.
+///
+/// So it is asserted rather than assumed: a target forwarded *second in a shared decode*,
+/// behind a long distractor, must equal the same target forwarded alone. Both orders, and
+/// a batch of identical copies, because a leak could plausibly run either way.
+///
+/// Requires `OPENJEV_MAX_SEQS > 1`; at 1 the backend loops and this is the test above.
+#[test]
+fn recurrent_state_does_not_leak_within_one_batched_decode() {
+    if env_max_seqs() < 2 {
+        eprintln!("skipped: set OPENJEV_MAX_SEQS>=2 to exercise the batched path");
+        return;
+    }
+    let Some(backend) = open_backend(hidden_size()) else {
+        return;
+    };
+    assert!(
+        backend
+            .capabilities()
+            .contains(openjev_core::backend::Caps::BATCH),
+        "OPENJEV_MAX_SEQS>1 must make the backend declare Caps::BATCH"
+    );
+
+    let target = EncodedInput::unpadded(ids(1, 22)).expect("target");
+    let alone = backend
+        .forward(std::slice::from_ref(&target))
+        .expect("alone");
+
+    for n in [8usize, 64, 256, 1024] {
+        let distractor = EncodedInput::unpadded(ids(7, n)).expect("distractor");
+
+        // Target SECOND in the shared decode.
+        let out = backend
+            .forward(&[distractor.clone(), target.clone()])
+            .expect("distractor+target");
+        let r_second = rel_l2(&alone[0].0, &out[1].0);
+
+        // Target FIRST, distractor after it in the same call.
+        let out = backend
+            .forward(&[target.clone(), distractor.clone()])
+            .expect("target+distractor");
+        let r_first = rel_l2(&alone[0].0, &out[0].0);
+
+        eprintln!(
+            "in-batch distractor {n:>5} tokens -> second relL2 {r_second:.3e}  first relL2 {r_first:.3e}"
+        );
+        for (label, r) in [("second", r_second), ("first", r_first)] {
+            assert!(
+                r < 1e-2,
+                "target {label} in a shared decode moved by relL2 {r:.3e} against a {n}-token \
+                 neighbour — state is leaking *within* one llama_decode, which is a confident \
+                 wrong label and not a crash"
+            );
+        }
+    }
+
+    // Identical copies in one call must all agree with each other and with the standalone
+    // result. A batch that quietly returns one sequence's state for every slot would pass
+    // a "they all match" check alone, so both comparisons are made.
+    let copies = vec![target.clone(); 4];
+    let out = backend.forward(&copies).expect("copies");
+    for (i, h) in out.iter().enumerate() {
+        let r = rel_l2(&alone[0].0, &h.0);
+        assert!(
+            r < 1e-3,
+            "copy {i} of an identical batch differs from the standalone result by {r:.3e}"
+        );
+    }
+}
+
 /// The same input twice in a row must agree. Determinism is the floor every other
 /// assertion in this file stands on.
 #[test]

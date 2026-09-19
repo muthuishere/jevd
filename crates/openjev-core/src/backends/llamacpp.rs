@@ -89,6 +89,30 @@ fn global_backend() -> Result<&'static LlamaBackend> {
         .map_err(|e| JevError::Native(format!("llama_backend_init failed: {e}")))
 }
 
+/// Largest `n_ctx` ggml-metal is known to survive on this class of device.
+///
+/// Measured by bisection on an M5 Pro: 28672 works, **32768 SIGSEGVs**, 65536 SIGSEGVs.
+/// CPU is fine at all of them, so it is a Metal allocation ceiling and not a model limit —
+/// the GGUF itself declares `qwen35.context_length = 262144`.
+///
+/// This cannot be probed in-process. The failure is a segfault inside ggml, not an error
+/// return, so by the time we could observe it there is no process left to report it. A
+/// conservative refusal *before* the allocation is the only implementation that is not a
+/// crash, and erring low is the only safe direction to err. See `docs/adr/0016`.
+const METAL_MAX_N_CTX: u32 = 28672;
+
+/// Raises [`METAL_MAX_N_CTX`] for someone on a different GPU who has measured their own
+/// ceiling. Named "unsafe" because it is: set it too high and the failure is a segfault,
+/// which is exactly what the constant exists to prevent.
+const METAL_CTX_OVERRIDE_ENV: &str = "OPENJEV_UNSAFE_METAL_MAX_CTX";
+
+fn metal_ctx_ceiling() -> u32 {
+    std::env::var(METAL_CTX_OVERRIDE_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(METAL_MAX_N_CTX)
+}
+
 /// Serialises model load + context creation across every backend instance in the
 /// process. See `LlamaCppBackend::open`.
 static INIT_LOCK: Mutex<()> = Mutex::new(());
@@ -236,6 +260,28 @@ impl LlamaCppBackend {
                     .map(|n| i32::try_from(n.get()).unwrap_or(4))
                     .unwrap_or(4)
             });
+
+        // Refuse before allocating, because the alternative is not an error — it is a
+        // SIGSEGV inside ggml-metal with no message, no log line and nothing naming the
+        // cause. `context` is user-editable registry data, so the config surface itself
+        // invites the value that crashes the process. Same failure class as ADR 0003: a
+        // silent one, from a direction the user cannot diagnose.
+        if matches!(req.device, Device::Metal) {
+            let ceiling = metal_ctx_ceiling();
+            if n_ctx > ceiling {
+                return Err(JevError::Device(format!(
+                    "context {n_ctx} exceeds what ggml-metal survives on this device \
+                     ({ceiling}); llama.cpp segfaults rather than failing, so openjev \
+                     refuses first.\n  \
+                     fix: lower `context` for this model in ~/.config/openjev/models.toml, \
+                     or run with --device cpu, which has no such limit.\n  \
+                     this is a Metal allocation ceiling, not a model limit — the weights \
+                     declare a far longer context, and NLI needs a few hundred tokens.\n  \
+                     if you have measured a higher ceiling on your GPU, set \
+                     {METAL_CTX_OVERRIDE_ENV}."
+                )));
+            }
+        }
 
         let max_seqs = req.max_seqs();
         // `context` is the TOTAL KV budget, shared across `max_seqs` sequences — which is
