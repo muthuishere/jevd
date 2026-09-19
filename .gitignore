@@ -2,3 +2,15 @@
 plugins/herdr-jev/bin/
 *.log
 .DS_Store
+
+# Weights and their by-products are never committed. The golden fixture (JSON) is;
+# multi-gigabyte binaries are not. `score.safetensors` is only 60 KB but it is still a
+# weight, and it belongs to the published HF repo, not to this one.
+*.gguf
+*.safetensors
+*.partial
+
+# Publish-time Python. Allowed at publish time, forbidden at runtime, never committed.
+venv/
+.venv/
+__pycache__/

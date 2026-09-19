@@ -25,7 +25,7 @@
 
 #![cfg(all(feature = "real-weights", feature = "backend-llamacpp"))]
 
-use openjev_core::backend::{Backend, EncodedInput, OpenRequest};
+use openjev_core::backend::OpenRequest;
 use openjev_core::backends::llamacpp;
 use openjev_core::device::{Device, Dtype};
 use openjev_core::head::Head;
@@ -116,12 +116,11 @@ fn session() -> Option<(Session, Golden)> {
     let head_file = env_path("OPENJEV_TEST_HEAD")?;
     let golden = load_golden()?;
 
-    let mut reg = Registry::default();
+    let reg = Registry::builtin().expect("the built-in registry must parse");
     let spec = reg
         .get("openjev-4b-nli-v2")
-        .cloned()
-        .unwrap_or_else(|| panic!("the built-in registry must still carry openjev-4b-nli-v2"));
-    let _ = &mut reg;
+        .expect("the built-in registry must still carry openjev-4b-nli-v2")
+        .clone();
 
     let encoder = Encoder::from_file(&spec, &tokenizer).expect("tokenizer must load");
     let head = Head::load(&spec.head, &head_file).expect("head must load");
@@ -223,9 +222,14 @@ fn probabilities_match_the_reference() {
 
     let mut worst = 0.0f32;
     let mut worst_idx = 0usize;
+    // Also measured against the fp32 reference. If we sit closer to fp32 than bf16 does,
+    // the deviation from bf16 is the reference's own rounding, not our error — and that
+    // is a materially different story from "we are 0.03 off".
+    let mut worst_fp32 = 0.0f32;
     let mut disagreements = Vec::new();
     for (p, out) in g.pairs.iter().zip(&got) {
         let d = max_abs(&out.probs, &p.probs_bf16);
+        worst_fp32 = worst_fp32.max(max_abs(&out.probs, &p.probs_fp32));
         if d > worst {
             worst = d;
             worst_idx = p.index;
@@ -243,11 +247,13 @@ fn probabilities_match_the_reference() {
 
     let agreement = 1.0 - disagreements.len() as f64 / g.pairs.len() as f64;
     eprintln!(
-        "golden: {} pairs  label agreement {:.1}%  max |dp| {:.4} (pair {})  reference spread {:.4}",
+        "golden: {} pairs  label agreement {:.1}%  max |dp| vs bf16 {:.4} (pair {})  \
+         vs fp32 {:.4}  reference's own bf16-vs-fp32 spread {:.4}",
         g.pairs.len(),
         agreement * 100.0,
         worst,
         worst_idx,
+        worst_fp32,
         g.ref_spread
     );
     for d in &disagreements {
