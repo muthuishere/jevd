@@ -19,8 +19,9 @@ Diverged so far:
 
 Closed risks: **R1** (ADR 0014), **R2** (ADR 0001, re-measured on the real 4B), **R3** and
 **R4** (`scripts/convert-model.sh` + the golden fixture), **R6** and **R7**
-(`tests/golden.rs`). Still open: **R5** (Metal shader embedding on a moved binary is
-unverified), **R8**, **R9**.
+(`tests/golden.rs`), **R5** (no `libllama`/`libggml` in `otool -L`, no `.metallib`
+sidecar, and a copy of the binary run from an unrelated directory still does a real Metal
+forward — though not yet on a second machine). Still open: **R8**, **R9**.
 
 Target: `openjev-core` (Rust lib), `openjev-cli`
 (binary `openjev`, `openjev serve`), `herdr-jev` (Go plugin, designed elsewhere).

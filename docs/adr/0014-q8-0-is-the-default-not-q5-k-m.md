@@ -34,11 +34,32 @@ probabilities to bars. Those callers feel 0.02 of drift directly, whatever the a
 Q8_0 sits at 4.6x the reference's own bf16-vs-fp32 spread. Q5_K_M sits at 10x it, and at
 that point the number is no longer characterisable as rounding.
 
+## The part that was not expected: Q8_0 is also the *fastest*
+
+Throughput, same machine, warm, pairs/s:
+
+| trunk | 32 tok | 128 tok | 512 tok |
+|---|---|---|---|
+| F16     | 15.2 | 11.4 | 4.1 |
+| **Q8_0**    | **16.7** | **12.4** | 4.0 |
+| Q5_K_M  | 15.7 | — | — |
+| Q4_K_M  | 15.1 | 10.9 | 3.3 |
+
+A 3x reduction in weight size buys **no** speed, and Q4_K_M is measurably *slower* than
+Q8_0. That is the signature of a compute-bound workload: an NLI prefill is a matmul against
+every weight in the model, the arithmetic is the cost, and a smaller quantisation only adds
+dequantisation work on the way in (ADR 0015 reaches the same conclusion from batching).
+
+So the usual quantisation trade — accuracy for speed — **is not on offer here**. Q8_0 is
+simultaneously the most accurate of the quantised options and the fastest. Q4_K_M is worse
+on both axes and is worth choosing only for the 1.8 GB of disk and memory.
+
 ## Consequences
 
 1.4 GB more to download than Q5_K_M, and ~5 GB resident. On the 16 GB machine design 01
 worried about that is still comfortable; a caller who would rather have the gigabyte back
-can set `dtype` and now has the number they are trading away.
+can set `dtype`, and now knows they are paying for it in accuracy *and* in speed rather
+than buying one with the other.
 
 **What this does not establish.** 35 pairs with zero label flips bounds the true flip rate
 only loosely — the one-sided 95 % bound is roughly 8 %, which is not a small number for a
