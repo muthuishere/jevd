@@ -1,0 +1,32 @@
+[package]
+name = "openjev-cli"
+description = "The openjev binary: NLI over HTTP, and the one-shot commands that compose in a pipeline."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "openjev"
+path = "src/main.rs"
+
+[dependencies]
+openjev-core = { path = "../openjev-core" }
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
+
+[features]
+default = []
+# Pass-throughs. A backend the binary was not built with must fail loudly naming the
+# feature, so the feature names here are exactly the ones the error message prints.
+backend-llamacpp = ["openjev-core/backend-llamacpp"]
+metal = ["backend-llamacpp", "openjev-core/metal"]
+cuda = ["backend-llamacpp", "openjev-core/cuda"]
+vulkan = ["backend-llamacpp", "openjev-core/vulkan"]
