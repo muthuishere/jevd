@@ -1,0 +1,49 @@
+[package]
+name = "openjev-core"
+description = "NLI inference core for openjev: backend trait, model registry, weight acquisition, classification head."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+toml = "1"
+bitflags = "2"
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+safetensors = "0.8"
+sha2 = "0.11"
+dirs = "7"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+half = "2"
+memmap2 = "0.9"
+
+# backend-llamacpp. `common` is off: we never touch llama.cpp's chat/grammar helpers,
+# and dropping libcommon.a takes ~14 MB off the link line.
+llama-cpp-2 = { version = "0.1.156", optional = true, default-features = false, features = ["openmp", "android-shared-stdcxx"] }
+# Used directly only for the two log sinks (llama_log_set + ggml_log_set); llama-cpp-2
+# wraps the first and not the second, and ggml is where the device banner comes from.
+llama-cpp-sys-2 = { version = "0.1.156", optional = true, default-features = false }
+
+[features]
+default = []
+backend-llamacpp = ["dep:llama-cpp-2", "dep:llama-cpp-sys-2"]
+
+# GPU backends. Each is a pass-through to llama-cpp-sys-2, and each is load-bearing for
+# device resolution: a device the binary was not built for fails loudly naming the
+# feature, rather than demoting to CPU behind the user's back.
+# metal needs no feature on macOS/aarch64 — llama-cpp-2 turns it on by target.
+metal  = ["llama-cpp-2/metal"]
+cuda   = ["llama-cpp-2/cuda"]
+vulkan = ["llama-cpp-2/vulkan"]
+
+# Integration tests that download real weights and run a real forward pass.
+real-weights = []
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
