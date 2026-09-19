@@ -8,7 +8,9 @@ use openjev_core::JevError;
 
 pub const OK: i32 = 0;
 pub const FAILURE: i32 = 1;
-/// clap owns 2; we never return it ourselves.
+/// clap owns 2 and returns it itself; it is named here so the table is complete and so
+/// nothing else ever claims the number.
+#[allow(dead_code)]
 pub const USAGE: i32 = 2;
 pub const CONFIG: i32 = 3;
 pub const MODEL_UNAVAILABLE: i32 = 4;
@@ -33,8 +35,6 @@ pub enum CliError {
     BadInput(String),
     #[error("no openjev server is reachable{0}")]
     NoServer(String),
-    #[error("server at {url} is running but not ready (phase: {phase})")]
-    NotReady { url: String, phase: String },
     #[error("{0}")]
     Other(String),
     #[error(transparent)]
@@ -59,7 +59,6 @@ impl CliError {
             CliError::Config(_) => CONFIG,
             CliError::BadInput(_) => BAD_INPUT,
             CliError::NoServer(_) => NO_SERVER,
-            CliError::NotReady { .. } => NOT_READY,
             CliError::Other(_) | CliError::Io(_) => FAILURE,
             CliError::Jev(e) => jev_exit_code(e),
         }

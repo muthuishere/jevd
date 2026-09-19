@@ -154,7 +154,12 @@ impl ServeArgs {
 #[derive(Debug, clap::Args, Clone)]
 pub struct Target {
     /// Send to a running server instead of loading the model in this process.
-    #[arg(long, value_name = "URL", env = "OPENJEV_URL", conflicts_with = "local")]
+    #[arg(
+        long,
+        value_name = "URL",
+        env = "OPENJEV_URL",
+        conflicts_with = "local"
+    )]
     pub server: Option<String>,
     /// Force in-process inference even when a server is discoverable.
     #[arg(long)]
@@ -342,10 +347,8 @@ mod tests {
     #[test]
     fn server_and_local_cannot_both_be_asked_for() {
         assert!(
-            Cli::try_parse_from([
-                "openjev", "rerank", "q", "--server", "http://x", "--local"
-            ])
-            .is_err()
+            Cli::try_parse_from(["openjev", "rerank", "q", "--server", "http://x", "--local"])
+                .is_err()
         );
     }
 }

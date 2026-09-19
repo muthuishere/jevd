@@ -4,12 +4,8 @@ use std::io::IsTerminal;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// TTY governs colour, spinners and progress — never the shape of stdout (design 02
-/// rule 4). Both streams are asked about separately because progress goes to stderr
-/// while data goes to stdout, and they are redirected independently.
-pub fn stdout_is_tty() -> bool {
-    std::io::stdout().is_terminal()
-}
-
+/// rule 4). stderr and stdin are asked about separately: progress goes to stderr and the
+/// consent prompt needs a readable stdin, and the two are redirected independently.
 pub fn stderr_is_tty() -> bool {
     std::io::stderr().is_terminal()
 }

@@ -85,20 +85,18 @@ pub struct Shared {
     pub model: RwLock<Option<ModelInfo>>,
     pub events: broadcast::Sender<serde_json::Value>,
     pub queue_depth: AtomicUsize,
-    pub max_queue: usize,
     pub started: Instant,
     pub requests_served: AtomicUsize,
 }
 
 impl Shared {
-    pub fn new(max_queue: usize) -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         let (events, _) = broadcast::channel(256);
         Arc::new(Self {
             state: RwLock::new(PhaseState::default()),
             model: RwLock::new(None),
             events,
             queue_depth: AtomicUsize::new(0),
-            max_queue,
             started: Instant::now(),
             requests_served: AtomicUsize::new(0),
         })
@@ -203,10 +201,7 @@ impl Engine {
         rx.await.map_err(|_| JobError::ShuttingDown)?
     }
 
-    pub async fn latents(
-        &self,
-        texts: Vec<String>,
-    ) -> Result<Outcome<Vec<Vec<f32>>>, JobError> {
+    pub async fn latents(&self, texts: Vec<String>) -> Result<Outcome<Vec<Vec<f32>>>, JobError> {
         let (resp, rx) = oneshot::channel();
         self.submit(Job {
             work: Work::Latents { texts, resp },
@@ -299,8 +294,8 @@ pub fn boot_loader(load: LoadSpec, shared: Arc<Shared>) -> Loader {
         }));
         shared.set_phase(Phase::Resolving, None);
         let t = Instant::now();
-        let (session, report) =
-            crate::runtime::load_session(&reg, &load, &spec, renderer).map_err(|e| e.to_string())?;
+        let (session, report) = crate::runtime::load_session(&reg, &load, &spec, renderer)
+            .map_err(|e| e.to_string())?;
         for w in &report.warnings {
             tracing::warn!("{w}");
         }
@@ -369,10 +364,9 @@ fn worker(mut rx: mpsc::Receiver<Job>, shared: Arc<Shared>, max_batch: usize, lo
                 Err(_) => break,
             }
         }
-        shared
-            .queue_depth
-            .fetch_sub(batch.len().min(usize::MAX), Ordering::Relaxed);
-        metrics::gauge!("openjev_queue_depth").set(shared.queue_depth.load(Ordering::Relaxed) as f64);
+        shared.queue_depth.fetch_sub(batch.len(), Ordering::Relaxed);
+        metrics::gauge!("openjev_queue_depth")
+            .set(shared.queue_depth.load(Ordering::Relaxed) as f64);
         metrics::histogram!("openjev_batch_size").record(pairs_in_batch as f64);
         run_batch(&session, batch);
     }
@@ -396,7 +390,7 @@ fn run_batch(session: &Session, batch: Vec<Job>) {
                 // A client that hung up while queued costs us nothing to drop, and that
                 // is the main win under load.
                 if resp.is_closed() {
-                    metrics::counter!("openjev_requests_total", "endpoint" => "canceled", "code" => "499").increment(1);
+                    metrics::counter!("openjev_requests_total", "endpoint" => "canceled", "code" => crate::api::Code::Canceled.status().to_string()).increment(1);
                     continue;
                 }
                 let range = flat.len()..flat.len() + pairs.len();
@@ -406,12 +400,15 @@ fn run_batch(session: &Session, batch: Vec<Job>) {
             Work::Latents { texts, resp } => {
                 let t = Instant::now();
                 let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-                let out = session.latents(&refs).map_err(map_err).map(|value| Outcome {
-                    value,
-                    queue_ms: job.enqueued.elapsed().as_millis() as u64
-                        - t.elapsed().as_millis() as u64,
-                    compute_ms: t.elapsed().as_millis() as u64,
-                });
+                let out = session
+                    .latents(&refs)
+                    .map_err(map_err)
+                    .map(|value| Outcome {
+                        value,
+                        queue_ms: job.enqueued.elapsed().as_millis() as u64
+                            - t.elapsed().as_millis() as u64,
+                        compute_ms: t.elapsed().as_millis() as u64,
+                    });
                 let _ = resp.send(out);
             }
         }
@@ -429,8 +426,10 @@ fn run_batch(session: &Session, batch: Vec<Job>) {
         Ok(preds) => {
             for (range, resp, enqueued) in pair_jobs {
                 let slice = preds[range].to_vec();
-                let queue_ms = enqueued.elapsed().as_millis().saturating_sub(compute_ms as u128)
-                    as u64;
+                let queue_ms = enqueued
+                    .elapsed()
+                    .as_millis()
+                    .saturating_sub(compute_ms as u128) as u64;
                 let _ = resp.send(Ok(Outcome {
                     value: slice,
                     queue_ms,
@@ -477,14 +476,14 @@ mod tests {
 
     #[test]
     fn a_fresh_server_is_starting_and_not_ready() {
-        let s = Shared::new(4);
+        let s = Shared::new();
         assert_eq!(s.phase(), Phase::Starting);
         assert!(!s.phase().is_ready());
     }
 
     #[test]
     fn phase_transitions_stamp_a_new_since_and_survive_a_reader() {
-        let s = Shared::new(4);
+        let s = Shared::new();
         let first = s.snapshot().since;
         s.set_phase(Phase::Downloading, None);
         let snap = s.snapshot();
@@ -495,7 +494,7 @@ mod tests {
 
     #[test]
     fn a_failed_load_is_terminal_and_carries_the_reason() {
-        let s = Shared::new(4);
+        let s = Shared::new();
         s.fail("no backend compiled in");
         let snap = s.snapshot();
         assert_eq!(snap.phase, Phase::Failed);
@@ -504,7 +503,7 @@ mod tests {
 
     #[tokio::test]
     async fn work_submitted_before_ready_is_refused_rather_than_queued() {
-        let shared = Shared::new(4);
+        let shared = Shared::new();
         let engine = Engine::spawn(
             shared.clone(),
             4,
@@ -523,7 +522,7 @@ mod tests {
 
     #[test]
     fn events_do_not_fail_when_nobody_is_listening() {
-        let s = Shared::new(4);
+        let s = Shared::new();
         s.emit("phase", serde_json::json!({"phase":"ready"}));
     }
 }

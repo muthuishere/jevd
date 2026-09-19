@@ -200,13 +200,7 @@ impl Layered {
                 value.type_str()
             )));
         }
-        self.map.insert(
-            key.to_string(),
-            Entry {
-                value,
-                source,
-            },
-        );
+        self.map.insert(key.to_string(), Entry { value, source });
         Ok(())
     }
 
@@ -238,7 +232,10 @@ impl Layered {
     }
 
     pub fn bool(&self, key: &str) -> bool {
-        matches!(self.map.get(key).map(|e| &e.value), Some(toml::Value::Boolean(true)))
+        matches!(
+            self.map.get(key).map(|e| &e.value),
+            Some(toml::Value::Boolean(true))
+        )
     }
 
     pub fn strings(&self, key: &str) -> Vec<String> {

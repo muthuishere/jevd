@@ -313,11 +313,7 @@ impl Phase {
 }
 
 pub fn scores_map(labels: &[String], probs: &[f32]) -> BTreeMap<String, f32> {
-    labels
-        .iter()
-        .cloned()
-        .zip(probs.iter().copied())
-        .collect()
+    labels.iter().cloned().zip(probs.iter().copied()).collect()
 }
 
 #[cfg(test)]

@@ -27,7 +27,6 @@ pub struct ServerState {
 }
 
 pub const SCHEMA: u32 = 1;
-pub const API_VERSION: u32 = 1;
 
 /// `$XDG_STATE_HOME/openjev`, else `~/.local/state/openjev`. macOS gets the same path as
 /// Linux on purpose: one tool, one location, so a script does not need an OS branch.
@@ -143,7 +142,7 @@ mod tests {
             pid: 1,
             url: url.into(),
             bound_addr: "127.0.0.1:21131".into(),
-            api_version: API_VERSION,
+            api_version: crate::api::API_VERSION,
             server_version: "0.1.0".into(),
             model: "m".into(),
             revision: "main".into(),

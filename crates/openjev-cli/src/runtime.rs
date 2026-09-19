@@ -163,6 +163,10 @@ pub fn ensure_consent(plan: &LoadPlan, opts: &ConsentOptions) -> CliResult<()> {
     }
 }
 
+/// A second consumer of hub progress — `/readyz` and `/v1/events` watch the same bytes
+/// the bar draws.
+pub type Observer = Box<dyn FnMut(&str, Progress) + Send>;
+
 /// Renders hub progress. On a TTY: one bar per file. Off one: a line every 5 s or every
 /// 10 %, because 40 MB of `\r` in a systemd journal helps nobody.
 pub struct ProgressRenderer {
@@ -174,7 +178,7 @@ pub struct ProgressRenderer {
     started: Instant,
     total_done: u64,
     /// Fan-out for `/v1/events` and `/readyz`.
-    pub observer: Option<Box<dyn FnMut(&str, Progress) + Send>>,
+    pub observer: Option<Observer>,
 }
 
 impl ProgressRenderer {
@@ -189,10 +193,6 @@ impl ProgressRenderer {
             total_done: 0,
             observer: None,
         }
-    }
-
-    pub fn bytes_downloaded(&self) -> u64 {
-        self.total_done
     }
 
     pub fn elapsed(&self) -> f64 {
@@ -360,7 +360,11 @@ mod tests {
     use super::*;
 
     fn plan_with(known: u64, incomplete: bool, missing: bool) -> LoadPlan {
-        let spec = Registry::builtin().unwrap().default_model().unwrap().clone();
+        let spec = Registry::builtin()
+            .unwrap()
+            .default_model()
+            .unwrap()
+            .clone();
         LoadPlan {
             spec,
             cache_root: PathBuf::from("/tmp"),
