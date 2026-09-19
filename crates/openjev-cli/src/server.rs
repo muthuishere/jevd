@@ -978,7 +978,10 @@ pub async fn run(cfg: ServerConfig, assume_yes: bool) -> CliResult<i32> {
     // rather than parking on a server that will never be ready. --no-preload keeps it up
     // and honest at 503.
     let failed = if cfg.preload {
-        Some(tokio::spawn(watch_for_failed_load(shared.clone())))
+        Some(tokio::spawn(watch_for_failed_load(
+            shared.clone(),
+            cfg.state_file.clone(),
+        )))
     } else {
         None
     };
@@ -1102,17 +1105,22 @@ async fn watch_sighup(_cfg: Arc<ServerConfig>) {
 }
 
 /// A model that will never load is a startup failure, not a permanent 503.
-async fn watch_for_failed_load(shared: Arc<Shared>) {
+async fn watch_for_failed_load(shared: Arc<Shared>, state_file: PathBuf) {
     loop {
         match shared.phase() {
             Phase::Failed => {
-                let msg = shared
-                    .snapshot()
+                let snap = shared.snapshot();
+                let msg = snap
                     .error
                     .map(|e| e.message)
                     .unwrap_or_else(|| "model load failed".into());
                 eprintln!("error: {msg}");
-                std::process::exit(crate::exit::MODEL_UNAVAILABLE);
+                // Exiting skips every destructor, so the discovery contract is honoured
+                // by hand here: a state file outliving its process is a client dialling a
+                // dead port.
+                crate::state::remove_state(&state_file);
+                let _ = std::fs::remove_file(crate::state::pid_file_for(&state_file));
+                std::process::exit(snap.exit_code);
             }
             Phase::Ready => return,
             _ => tokio::time::sleep(Duration::from_millis(200)).await,

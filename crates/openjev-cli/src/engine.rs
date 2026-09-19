@@ -27,6 +27,9 @@ pub struct PhaseState {
     pub since: String,
     pub detail: Option<ReadyDetail>,
     pub error: Option<ErrorBody>,
+    /// The exit code a preloading server should die with. Carried from the load failure
+    /// so "no backend compiled in" (5) does not report itself as "model unavailable" (4).
+    pub exit_code: i32,
 }
 
 impl Default for PhaseState {
@@ -36,6 +39,7 @@ impl Default for PhaseState {
             since: crate::util::rfc3339_now(),
             detail: None,
             error: None,
+            exit_code: crate::exit::FAILURE,
         }
     }
 }
@@ -120,6 +124,7 @@ impl Shared {
                     detail: None,
                     request_id: None,
                 }),
+                exit_code: crate::exit::FAILURE,
             })
     }
 
@@ -141,6 +146,10 @@ impl Shared {
     }
 
     pub fn fail(&self, message: impl Into<String>) {
+        self.fail_with(message, crate::exit::FAILURE);
+    }
+
+    pub fn fail_with(&self, message: impl Into<String>, exit_code: i32) {
         let message = message.into();
         if let Ok(mut s) = self.state.write() {
             s.phase = Phase::Failed;
@@ -151,6 +160,7 @@ impl Shared {
                 detail: None,
                 request_id: None,
             });
+            s.exit_code = exit_code;
         }
         self.emit(
             "phase",
@@ -234,14 +244,16 @@ impl Engine {
 }
 
 /// Deferred load, run on the worker thread.
-pub type Loader = Box<dyn FnOnce(&mut ProgressRenderer) -> Result<Session, String> + Send>;
+pub type LoadFailure = (String, i32);
+pub type Loader = Box<dyn FnOnce(&mut ProgressRenderer) -> Result<Session, LoadFailure> + Send>;
 
 /// Builds the loader the server uses: core's `boot`, with progress fanned out to
 /// `/readyz` and `/v1/events`.
 pub fn boot_loader(load: LoadSpec, shared: Arc<Shared>) -> Loader {
     Box::new(move |renderer: &mut ProgressRenderer| {
-        let reg = Registry::load(None).map_err(|e| e.to_string())?;
-        let spec = crate::runtime::resolve_spec(&reg, &load).map_err(|e| e.to_string())?;
+        let fail = |e: crate::exit::CliError| (e.to_string(), e.exit_code());
+        let reg = Registry::load(None).map_err(|e| fail(e.into()))?;
+        let spec = crate::runtime::resolve_spec(&reg, &load).map_err(fail)?;
         if spec.revision_is_floating() {
             // Loud, not hidden: a floating revision means two machines can serve
             // different weights under one version string.
@@ -294,8 +306,8 @@ pub fn boot_loader(load: LoadSpec, shared: Arc<Shared>) -> Loader {
         }));
         shared.set_phase(Phase::Resolving, None);
         let t = Instant::now();
-        let (session, report) = crate::runtime::load_session(&reg, &load, &spec, renderer)
-            .map_err(|e| e.to_string())?;
+        let (session, report) =
+            crate::runtime::load_session(&reg, &load, &spec, renderer).map_err(fail)?;
         for w in &report.warnings {
             tracing::warn!("{w}");
         }
@@ -327,9 +339,9 @@ fn worker(mut rx: mpsc::Receiver<Job>, shared: Arc<Shared>, max_batch: usize, lo
     let mut renderer = ProgressRenderer::new(crate::util::stderr_is_tty());
     let session = match loader(&mut renderer) {
         Ok(s) => s,
-        Err(e) => {
+        Err((e, code)) => {
             tracing::error!("model load failed: {e}");
-            shared.fail(e);
+            shared.fail_with(e, code);
             // Drain and refuse: a caller blocked forever on a server that will never
             // load is worse than a 503 that says why.
             rx.close();
@@ -508,7 +520,12 @@ mod tests {
             shared.clone(),
             4,
             32,
-            Box::new(|_| Err("no weights in a unit test".to_string())),
+            Box::new(|_| {
+                Err((
+                    "no weights in a unit test".to_string(),
+                    crate::exit::FAILURE,
+                ))
+            }),
         );
         let err = engine
             .predict(vec![("a".into(), "b".into())])
