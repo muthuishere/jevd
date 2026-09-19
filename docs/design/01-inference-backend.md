@@ -4,7 +4,25 @@
 an Apple Silicon laptop this month, with no Python at runtime, without us first writing a
 research-grade kernel.**
 
-Status: design, not built. Repo empty. Target: `openjev-core` (Rust lib), `openjev-cli`
+Status: **built and measured against the reference, 2026-09-20.** This document is kept as
+written so the reasoning can be checked against what happened; where reality diverged, an
+ADR says so and the ADR wins.
+
+Diverged so far:
+
+| this doc says | reality | where |
+|---|---|---|
+| left-pad a batch (§5) | right-pad + explicit pool index; a recurrence cannot be masked | ADR 0013 |
+| default Q5_K_M (§5) | default Q8_0, on measured probability drift | ADR 0014 |
+| the converter is broken, apply PR #27132 (§0, R3) | #27019 is already fixed on master; what actually blocks is the unregistered `ForSequenceClassification` architecture and the unmappable `score.weight` | `scripts/convert-model.sh` |
+| batching is the Engine's job and wins throughput (§2) | it wins nothing here — an NLI prefill is already compute-bound | ADR 0015 |
+
+Closed risks: **R1** (ADR 0014), **R2** (ADR 0001, re-measured on the real 4B), **R3** and
+**R4** (`scripts/convert-model.sh` + the golden fixture), **R6** and **R7**
+(`tests/golden.rs`). Still open: **R5** (Metal shader embedding on a moved binary is
+unverified), **R8**, **R9**.
+
+Target: `openjev-core` (Rust lib), `openjev-cli`
 (binary `openjev`, `openjev serve`), `herdr-jev` (Go plugin, designed elsewhere).
 
 ## 0. Verified upstream facts (do not re-derive)
