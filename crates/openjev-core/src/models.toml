@@ -24,7 +24,7 @@ hidden_size = 2560
 repo = "AlexWortega/openjev"
 file = "qwen3.5-4b-nli-v2/tokenizer.json"
 pad_token_id = 248044
-padding_side = "left"
+padding_side = "right"
 
 [models."openjev-4b-nli-v2".head]
 kind = "linear"

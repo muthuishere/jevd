@@ -127,8 +127,15 @@ impl Session {
 
     /// Options sorted by `P(entailment)`, descending. Stable within equal scores, so a
     /// tie preserves input order rather than shuffling between runs.
+    ///
+    /// **The question is the premise and the option is the hypothesis**, matching the
+    /// reference implementation (`modeling_openjev.py::rerank` scores
+    /// `predict([(question, option)])`). Entailment is not symmetric: asking whether an
+    /// option entails the question is a different question from whether the question
+    /// entails the option, and it produces a different ranking — silently, with no error.
+    /// See `docs/adr/0012`.
     pub fn rerank(&self, question: &str, options: &[&str]) -> Result<Vec<Ranked>> {
-        let pairs: Vec<(&str, &str)> = options.iter().map(|o| (*o, question)).collect();
+        let pairs: Vec<(&str, &str)> = options.iter().map(|o| (question, *o)).collect();
         let mut ranked: Vec<Ranked> = self
             .predict(&pairs)?
             .into_iter()
@@ -205,6 +212,12 @@ mod tests {
         caps: Caps,
         states: Vec<Vec<f32>>,
         calls: std::sync::Mutex<Vec<usize>>,
+        /// Every token sequence this backend was handed, in order. `rerank` puts the
+        /// question in the premise slot and the option in the hypothesis slot, and the
+        /// only way to assert that is to look at what actually reached the backend —
+        /// asserting it against the encoder instead would only restate the encoder.
+        /// Shared, so the test keeps a handle after the backend is boxed into the Session.
+        seqs: Recorder,
     }
 
     impl Backend for Fake {
@@ -221,12 +234,17 @@ mod tests {
         }
         fn forward(&self, batch: &[EncodedInput]) -> Result<Vec<Hidden>> {
             self.calls.lock().expect("lock").push(batch.len());
+            let mut seqs = self.seqs.lock().expect("lock");
             Ok(batch
                 .iter()
                 .map(|i| {
-                    // The first token (the premise word, given this fixture's template)
+                    seqs.push(i.tokens.clone());
+                    // The LAST token (the hypothesis word, given this fixture's template)
                     // selects the canned state, so a test can say which pair got which.
-                    let k = (i.tokens[0] as usize) % self.states.len();
+                    // Keying on the first token instead would make `rerank` indistinguish-
+                    // able from a `rerank` that swapped premise and hypothesis, because
+                    // every pair would then share the question's leading token.
+                    let k = (*i.tokens.last().expect("non-empty") as usize) % self.states.len();
                     Hidden(self.states[k].clone())
                 })
                 .collect())
@@ -259,7 +277,14 @@ mod tests {
         .expect("head")
     }
 
+    type Recorder = std::sync::Arc<std::sync::Mutex<Vec<Vec<u32>>>>;
+
     fn session(caps: Caps, states: Vec<Vec<f32>>) -> Session {
+        session_recording(caps, states).0
+    }
+
+    /// The session plus a handle on every token sequence the backend is handed.
+    fn session_recording(caps: Caps, states: Vec<Vec<f32>>) -> (Session, Recorder) {
         let mut reg = Registry::default();
         reg.merge_str(
             r#"
@@ -296,12 +321,17 @@ weights = { repo = "r", file = "w" }
         .expect("tokenizer json");
 
         let encoder = Encoder::new(&spec, tok).expect("encoder");
+        let seqs: Recorder = Default::default();
         let backend = Box::new(Fake {
             caps,
             states,
             calls: std::sync::Mutex::new(Vec::new()),
+            seqs: std::sync::Arc::clone(&seqs),
         });
-        Session::new(spec, encoder, head2x2(), backend).expect("session")
+        (
+            Session::new(spec, encoder, head2x2(), backend).expect("session"),
+            seqs,
+        )
     }
 
     #[test]
@@ -340,6 +370,42 @@ weights = { repo = "r", file = "w" }
         assert_eq!(r.iter().map(|x| x.index).collect::<Vec<_>>(), vec![1, 2, 0]);
         assert!(r[0].score > r[1].score && r[1].score > r[2].score);
         assert_eq!(r[0].score, r[0].prediction.probs[1]);
+    }
+
+    /// The question goes in the premise slot and the option in the hypothesis slot.
+    ///
+    /// Entailment is directional. Scoring `(option, question)` instead asks whether each
+    /// option entails the question, which is a different quantity with a different
+    /// ranking — and nothing about it fails. It just returns the wrong order forever.
+    /// Asserted against what actually reached the backend, because restating the encoder
+    /// would prove nothing about `rerank`.
+    #[test]
+    fn rerank_puts_the_question_in_the_premise_slot() {
+        let (s, seqs) = session_recording(
+            Caps::LATENTS,
+            vec![vec![9.0, 0.0], vec![0.0, 9.0], vec![0.0, 3.0]],
+        );
+        // Template is "{premise} {hypothesis}" and the fixture tokenizer is word-level,
+        // so token[0] is the premise word and the last token is the hypothesis word.
+        let id = |w: &str| s.encoder.encode_text(w).expect("encode")[0];
+        let opts = ["zero", "one", "two"];
+
+        s.rerank("question", &opts).expect("rerank");
+
+        let seen = seqs.lock().expect("lock").clone();
+        assert_eq!(seen.len(), opts.len());
+        for (seq, opt) in seen.iter().zip(&opts) {
+            assert_eq!(
+                seq[0],
+                id("question"),
+                "premise slot must hold the question"
+            );
+            assert_eq!(
+                *seq.last().expect("non-empty"),
+                id(opt),
+                "hypothesis slot must hold the option"
+            );
+        }
     }
 
     #[test]

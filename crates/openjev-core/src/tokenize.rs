@@ -8,21 +8,33 @@
 //! Two rules, both enforced here rather than trusted to each backend:
 //!   1. An unpadded batch pools at `len - 1`. That is v0.1's llama.cpp path: each pair is
 //!      its own sequence, no padding exists.
-//!   2. A padded batch is **left**-padded, so the last index is always real text and
-//!      pooling is index arithmetic-free. Right padding is representable in the config
-//!      but carries a per-row pool index, and the test suite asserts the two agree.
+//!   2. A padded batch is **right**-padded with an explicit per-row `pool_index`, matching
+//!      the reference. Left padding is representable in the config and is *wrong* for this
+//!      architecture: 24 of the 32 layers are recurrent, and a recurrence cannot be masked
+//!      — leading pads advance the state at every real position that follows, making a
+//!      pair's answer depend on the longest other pair in its batch. See `docs/adr/0013`.
+//!      The test suite asserts both sides pool the same *tokens*, which is the only thing
+//!      they still agree on.
 
 use crate::backend::EncodedInput;
 use crate::error::{JevError, Result};
 use crate::registry::{ModelSpec, PaddingSide};
 use tokenizers::Tokenizer;
 
-/// Render the NLI template. No trimming, no normalisation: any drift here changes the
-/// label distribution, so the substitution is dumb on purpose and covered by a test.
+/// Render the NLI template.
+///
+/// **Both fields are trimmed**, because the reference implementation trims them:
+/// `modeling_openjev.py` renders `template.format(premise=p.strip(), hypothesis=h.strip())`.
+/// That `.strip()` is not cosmetic — a leading `"\n"` on the hypothesis is a different
+/// token sequence and therefore a different label distribution. We match the reference or
+/// we are a different model; see `docs/adr/0011`.
+///
+/// Nothing else is normalised. The substitution is otherwise dumb on purpose: braces that
+/// arrive inside user text are never re-expanded, which a test pins.
 pub fn render(template: &str, premise: &str, hypothesis: &str) -> String {
     template
-        .replace("{premise}", premise)
-        .replace("{hypothesis}", hypothesis)
+        .replace("{premise}", premise.trim())
+        .replace("{hypothesis}", hypothesis.trim())
 }
 
 pub struct Encoder {
@@ -152,11 +164,16 @@ mod tests {
     }
 
     #[test]
-    fn template_does_not_trim_or_normalise() {
-        // Whitespace is the caller's problem. We must not silently change the input.
+    fn template_trims_both_fields_exactly_as_the_reference_does() {
+        // `modeling_openjev.py`: template.format(premise=p.strip(), hypothesis=h.strip()).
+        // Passing the whitespace through instead is a different token sequence and so a
+        // different label distribution — the golden fixture carries two whitespace-bearing
+        // pairs precisely to catch a regression here.
+        assert_eq!(render("{premise}|{hypothesis}", "  a  ", "\tb\n"), "a|b");
+        // Interior whitespace is untouched; only the ends are trimmed.
         assert_eq!(
-            render("{premise}|{hypothesis}", "  a  ", "\tb\n"),
-            "  a  |\tb\n"
+            render("{premise}|{hypothesis}", " a  b ", "c\n\nd"),
+            "a  b|c\n\nd"
         );
     }
 

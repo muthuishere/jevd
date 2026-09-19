@@ -708,23 +708,36 @@ async fn rerank(
         )?;
     }
     let info = state.model_or_not_ready()?;
-    // The pair order (option, question) is core's `Session::rerank`. Duplicated here
-    // rather than routed through it so that batching still coalesces reranks with
-    // predicts; a divergence would move the decision boundary, so it is a test.
+    // The pair order (question, option) is core's `Session::rerank`: the question is the
+    // premise, the option is the hypothesis. Duplicated here rather than routed through
+    // core so that batching still coalesces reranks with predicts — which means this line
+    // is a second place to be wrong, and it *was* wrong (both sides scored the pair
+    // backwards until the golden fixture caught it). See `docs/adr/0012`.
     let pairs: Vec<(String, String)> = req
         .options
         .iter()
-        .map(|o| (o.clone(), req.question.clone()))
+        .map(|o| (req.question.clone(), o.clone()))
         .collect();
     let n = pairs.len();
     let out = with_deadline(&state, async { Ok(state.engine.predict(pairs).await?) }).await?;
     state.shared.requests_served.fetch_add(1, Ordering::Relaxed);
 
+    // `unwrap_or(0)` here would rank every option by P(contradiction) the moment the
+    // entailment label stopped matching — a confident, silent reversal of the ranking.
+    // Core refuses that at boot; so does this.
     let ent = info
         .labels
         .iter()
         .position(|l| *l == info.entailment_label)
-        .unwrap_or(0);
+        .ok_or_else(|| {
+            ApiError::new(
+                Code::Internal,
+                format!(
+                    "entailment label '{}' is not among the model's labels {:?}",
+                    info.entailment_label, info.labels
+                ),
+            )
+        })?;
     let mut ranked: Vec<(usize, f32)> = out
         .value
         .iter()

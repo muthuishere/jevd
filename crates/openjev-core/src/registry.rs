@@ -42,8 +42,19 @@ pub struct TokenizerSpec {
     pub padding_side: PaddingSide,
 }
 
+/// **Right**, because the reference implementation right-pads and gathers the last
+/// non-pad token (`modeling_openjev.py` sets `tok.padding_side = "right"` and pools at
+/// `attention_mask.sum(1) - 1`).
+///
+/// Left-padding is the usual advice for decoder cross-encoders and it is wrong here. The
+/// 24 linear-attention layers carry a gated-DeltaNet recurrent state, and that state is
+/// advanced by every token it is fed: `n` leading pad tokens change the state at every
+/// real position that follows. Attention can be masked; a recurrence cannot be masked
+/// after the fact. Right-padding plus an explicit per-row pool index keeps the real text
+/// at the front of the sequence, which is the only arrangement that matches the reference.
+/// See `docs/adr/0013`.
 fn default_padding_side() -> PaddingSide {
-    PaddingSide::Left
+    PaddingSide::Right
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -395,7 +406,9 @@ mod tests {
         assert_eq!(m.labels, ["contradiction", "entailment", "neutral"]);
         assert_eq!(m.entailment_index().unwrap(), 1);
         assert_eq!(m.tokenizer.pad_token_id, 248044);
-        assert_eq!(m.tokenizer.padding_side, PaddingSide::Left);
+        // Right, matching the reference. See `default_padding_side` for why left
+        // padding is not a stylistic choice on a recurrent trunk.
+        assert_eq!(m.tokenizer.padding_side, PaddingSide::Right);
         assert_eq!(m.hidden_size, 2560);
         assert!(m.backends.contains_key("llamacpp"));
     }
