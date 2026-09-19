@@ -988,17 +988,31 @@ pub async fn run(cfg: ServerConfig, assume_yes: bool) -> CliResult<i32> {
 
     let shutdown_shared = shared.clone();
     let grace = cfg.shutdown_grace_secs;
-    let served = axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let code = wait_for_shutdown().await;
-            tracing::info!(signal = code, "draining");
-            // /readyz goes 503 first so a load balancer stops sending before we stop
-            // accepting.
-            shutdown_shared.set_phase(Phase::Draining, None);
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let _ = grace;
-        })
-        .await;
+    let (drained_tx, mut drained_rx) = tokio::sync::watch::channel(false);
+    let serve_fut = axum::serve(listener, app).with_graceful_shutdown(async move {
+        let code = wait_for_shutdown().await;
+        tracing::info!(signal = code, "draining");
+        // /readyz goes 503 first so a load balancer stops sending before we stop
+        // accepting.
+        shutdown_shared.set_phase(Phase::Draining, None);
+        let _ = drained_tx.send(true);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    });
+    // IntoFuture, not Future: pin the future it produces.
+    let serve_fut = std::future::IntoFuture::into_future(serve_fut);
+    tokio::pin!(serve_fut);
+    // The grace window is a bound, not a hope: a "graceful" shutdown you cannot get out
+    // of is the failure this is organised against.
+    let served = tokio::select! {
+        r = &mut serve_fut => r,
+        _ = async {
+            let _ = drained_rx.wait_for(|d| *d).await;
+            tokio::time::sleep(Duration::from_secs(grace)).await;
+        } => {
+            tracing::warn!(grace_secs = grace, "grace window expired; dropping in-flight work");
+            Ok(())
+        }
+    };
 
     announce.abort();
     reloader.abort();
