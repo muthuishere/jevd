@@ -175,7 +175,11 @@ struct Inner {
     /// Monotonic sequence id. A fresh id per forward, on top of the memory clear, so a
     /// stale recurrent state has no id to be found under.
     next_seq: i32,
+    /// Per-sequence context limit. llama.cpp's `n_ctx` is the whole KV budget shared
+    /// across `n_seq_max` sequences, so the limit one input must respect is that divided
+    /// by the sequence count — not the number the operator typed.
     n_ctx: u32,
+    max_seqs: usize,
 }
 
 // SAFETY: every access to `ctx` goes through the `Mutex`, which is the synchronisation
@@ -233,13 +237,22 @@ impl LlamaCppBackend {
                     .unwrap_or(4)
             });
 
+        let max_seqs = req.max_seqs();
+        // `context` is the TOTAL KV budget, shared across `max_seqs` sequences — which is
+        // what llama.cpp's `n_ctx` means. Scaling it *up* with the sequence count instead
+        // is how the first attempt at this asked for 131072 tokens of context and
+        // segfaulted; memory here must stay flat as batching grows, and the per-sequence
+        // limit falls out as the quotient.
+        let per_seq = (n_ctx / u32::try_from(max_seqs).unwrap_or(1)).max(1);
+
         let ctx_params = LlamaContextParams::default()
             .with_n_ctx(NonZeroU32::new(n_ctx))
-            // One sequence per generation: v0.1 declares !Caps::BATCH, so nothing pads and
-            // nothing shares a context with anything else.
+            // n_batch/n_ubatch bound the tokens in one decode. Sized to the whole context
+            // so a coalesced group is one graph rather than several — which is the entire
+            // point of batching on a GPU this underfed.
             .with_n_batch(n_ctx)
             .with_n_ubatch(n_ctx)
-            .with_n_seq_max(1)
+            .with_n_seq_max(u32::try_from(max_seqs).unwrap_or(1))
             .with_n_threads(threads)
             .with_n_threads_batch(threads)
             .with_embeddings(true)
@@ -264,8 +277,14 @@ impl LlamaCppBackend {
             hidden_size: n_embd,
             // No IMAGES: v0.1 is text-only and says so, rather than emitting image
             // placeholder tokens the trunk would answer wrongly about.
-            // No BATCH: one sequence per forward, which is also why nothing pads.
-            caps: Caps::LATENTS,
+            // BATCH only when the context was actually built for more than one sequence.
+            // Declaring it otherwise would make the Engine hand us batches we would then
+            // silently serialise, and the throughput table would stop meaning anything.
+            caps: if max_seqs > 1 {
+                Caps::LATENTS | Caps::BATCH
+            } else {
+                Caps::LATENTS
+            },
         };
 
         Ok(Self {
@@ -273,7 +292,8 @@ impl LlamaCppBackend {
                 ctx,
                 model,
                 next_seq: 0,
-                n_ctx,
+                n_ctx: per_seq,
+                max_seqs,
             }),
             info,
         })
@@ -291,28 +311,56 @@ impl Backend for LlamaCppBackend {
             .lock()
             .map_err(|_| JevError::backend(NAME, anyhow::anyhow!("context mutex poisoned")))?;
 
-        let mut out = Vec::with_capacity(batch.len());
+        let per_seq_limit = inner.n_ctx as usize;
         for input in batch {
-            if input.tokens.len() > inner.n_ctx as usize {
+            if input.tokens.len() > per_seq_limit {
                 return Err(JevError::ContextOverflow {
                     tokens: input.tokens.len(),
-                    limit: inner.n_ctx as usize,
+                    limit: per_seq_limit,
                 });
             }
-            // Full memory clear between sequences. This is what makes a leaked
-            // gated-DeltaNet state unrepresentable rather than merely unlikely.
-            inner.ctx.clear_kv_cache();
-            let seq = inner.next_seq;
-            inner.next_seq = inner.next_seq.wrapping_add(1).max(0);
+        }
 
-            let mut lbatch = LlamaBatch::new(input.tokens.len(), 1);
-            for (pos, &tok) in input.tokens.iter().enumerate() {
-                let pos = i32::try_from(pos)
-                    .map_err(|_| JevError::backend(NAME, anyhow::anyhow!("position overflow")))?;
-                let last = pos as usize == input.pool_index;
-                lbatch
-                    .add(LlamaToken(tok as i32), pos, &[0], last)
-                    .map_err(|e| JevError::backend(NAME, anyhow::anyhow!("batch add: {e}")))?;
+        let max_seqs = inner.max_seqs;
+        let mut out = Vec::with_capacity(batch.len());
+
+        // One decode per group of at most `max_seqs` sequences. At max_seqs = 1 this is
+        // exactly the old one-sequence-per-decode path, byte for byte.
+        for group in batch.chunks(max_seqs) {
+            // Full memory clear before every group. This is what makes a leaked
+            // gated-DeltaNet state unrepresentable rather than merely unlikely: no
+            // sequence in this group can see anything from a previous group, and within
+            // the group each sequence carries its own recurrent state under its own
+            // seq_id. That llama.cpp really keeps those states separate is not taken on
+            // faith — `tests/golden.rs` forwards a mixed-length batch and asserts every
+            // pair gets the answer it gets alone.
+            inner.ctx.clear_kv_cache();
+            let seq_base = inner.next_seq;
+            inner.next_seq = inner
+                .next_seq
+                .wrapping_add(i32::try_from(group.len()).unwrap_or(1))
+                .max(0);
+
+            let total_tokens: usize = group.iter().map(|i| i.tokens.len()).sum();
+            // Second argument is seq-ids *per token*, not sequences per batch: every
+            // token here belongs to exactly one sequence.
+            let mut lbatch = LlamaBatch::new(total_tokens, 1);
+
+            for (s, input) in group.iter().enumerate() {
+                let seq_id = i32::try_from(s)
+                    .map_err(|_| JevError::backend(NAME, anyhow::anyhow!("sequence overflow")))?;
+                for (pos, &tok) in input.tokens.iter().enumerate() {
+                    let pos = i32::try_from(pos).map_err(|_| {
+                        JevError::backend(NAME, anyhow::anyhow!("position overflow"))
+                    })?;
+                    // `logits = true` only on the pooled position. With pooling = LAST
+                    // llama.cpp needs the sequence's output flagged, and flagging every
+                    // token would allocate an output buffer per token for nothing.
+                    let last = pos as usize == input.pool_index;
+                    lbatch
+                        .add(LlamaToken(tok as i32), pos, &[seq_id], last)
+                        .map_err(|e| JevError::backend(NAME, anyhow::anyhow!("batch add: {e}")))?;
+                }
             }
 
             inner
@@ -320,41 +368,47 @@ impl Backend for LlamaCppBackend {
                 .decode(&mut lbatch)
                 .map_err(|e| JevError::backend(NAME, anyhow::anyhow!("decode: {e}")))?;
 
-            let embd = inner
-                .ctx
-                .embeddings_seq_ith(0)
-                .map_err(|e| JevError::backend(NAME, anyhow::anyhow!("embeddings: {e}")))?;
+            for s in 0..group.len() {
+                let seq_id = i32::try_from(s)
+                    .map_err(|_| JevError::backend(NAME, anyhow::anyhow!("sequence overflow")))?;
+                let embd = inner.ctx.embeddings_seq_ith(seq_id).map_err(|e| {
+                    JevError::backend(NAME, anyhow::anyhow!("embeddings seq {seq_id}: {e}"))
+                })?;
 
-            if embd.len() != self.info.hidden_size {
-                return Err(JevError::backend(
-                    NAME,
-                    anyhow::anyhow!(
-                        "pooled state is {} wide, expected {}",
-                        embd.len(),
-                        self.info.hidden_size
-                    ),
-                ));
+                if embd.len() != self.info.hidden_size {
+                    return Err(JevError::backend(
+                        NAME,
+                        anyhow::anyhow!(
+                            "pooled state is {} wide, expected {}",
+                            embd.len(),
+                            self.info.hidden_size
+                        ),
+                    ));
+                }
+                // An all-zero or non-finite pooled state is the observed shape of ggml
+                // corruption (see the init lock above): no error is raised, the vector is
+                // just dead, and the head would turn it into a uniform-but-confident
+                // label. Refusing here is the difference between a loud failure and a
+                // wrong answer. Batching makes this check matter more, not less — a
+                // sequence whose slot was never filled reads as exactly this.
+                if !embd.iter().any(|v| *v != 0.0) {
+                    return Err(JevError::backend(
+                        NAME,
+                        anyhow::anyhow!(
+                            "pooled hidden state for sequence {seq_id} is all zeros — the \
+                             forward pass produced nothing"
+                        ),
+                    ));
+                }
+                if !embd.iter().all(|v| v.is_finite()) {
+                    return Err(JevError::backend(
+                        NAME,
+                        anyhow::anyhow!("pooled hidden state contains NaN or infinity"),
+                    ));
+                }
+                out.push(Hidden(embd.to_vec()));
             }
-            // An all-zero or non-finite pooled state is the observed shape of ggml
-            // corruption (see the init lock above): no error is raised, the vector is
-            // just dead, and the head would turn it into a uniform-but-confident label.
-            // Refusing here is the difference between a loud failure and a wrong answer.
-            if !embd.iter().any(|v| *v != 0.0) {
-                return Err(JevError::backend(
-                    NAME,
-                    anyhow::anyhow!(
-                        "pooled hidden state is all zeros — the forward pass produced nothing"
-                    ),
-                ));
-            }
-            if !embd.iter().all(|v| v.is_finite()) {
-                return Err(JevError::backend(
-                    NAME,
-                    anyhow::anyhow!("pooled hidden state contains NaN or infinity"),
-                ));
-            }
-            out.push(Hidden(embd.to_vec()));
-            let _ = seq;
+            let _ = seq_base;
         }
         Ok(out)
     }

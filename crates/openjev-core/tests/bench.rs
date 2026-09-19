@@ -56,6 +56,7 @@ fn open() -> Option<(Box<dyn Backend>, String)> {
     let threads = std::env::var("OPENJEV_BENCH_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok());
+    let max_seqs = env_usize("OPENJEV_MAX_SEQS", 1);
 
     let mut reg = Registry::default();
     reg.merge_str(
@@ -101,11 +102,13 @@ weights = {{ repo = "r", file = "w.gguf" }}
             dtype: Dtype::Quant(dtype_label),
             context: ctx,
             n_threads: threads,
+            max_seqs,
         })
         .expect("backend must open");
     let label = format!(
-        "{}  device={device}  dtype={dtype_label}  n_ctx={ctx}  threads={}  load={:.1}s",
+        "{}  device={device}  dtype={dtype_label}  n_ctx={ctx}(total)  max_seqs={max_seqs}  ctx/seq={}  threads={}  load={:.1}s",
         path.file_name().unwrap_or_default().to_string_lossy(),
+        ctx / max_seqs.max(1),
         threads
             .map(|t| t.to_string())
             .unwrap_or_else(|| "auto".into()),
@@ -133,10 +136,9 @@ fn report_latency_and_throughput() {
         "tokens", "batch", "p50 ms", "p95 ms", "pairs/s"
     );
 
-    // Batch sizes are swept even though the backend declares !Caps::BATCH and loops
-    // internally. That is the point: it measures what coalescing would have to beat, and
-    // a flat line across batch size is the evidence that batching is unimplemented rather
-    // than unhelpful.
+    // Batch size is swept regardless of `max_seqs`. At `max_seqs = 1` the backend loops
+    // internally and the line comes out flat — which is the evidence that batching is
+    // unimplemented rather than unhelpful, and the baseline anything else has to beat.
     let batches: Vec<usize> = std::env::var("OPENJEV_BENCH_BATCHES")
         .unwrap_or_else(|_| "1,4,16".into())
         .split(',')

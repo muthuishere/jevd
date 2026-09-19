@@ -9,7 +9,7 @@
 [models."openjev-4b-nli-v2"]
 default   = true
 repo      = "AlexWortega/openjev"
-revision  = "main"                 # TODO(publish): pin to a commit sha before 0.1.0 ships
+revision  = "4b5f9a67fa2ebe77466bce0656ce350effc3148c"   # AlexWortega/openjev @ 2026-09-20
 subfolder = "qwen3.5-4b-nli-v2"
 arch      = "qwen3_5"
 task      = "sequence-classification"
@@ -37,14 +37,25 @@ file = "openjev-4b-nli-v2/score.safetensors"
 
 [models."openjev-4b-nli-v2".backends.llamacpp]
 requires = ["qwen3_5-hybrid"]
-dtype_label = "q5_k_m"
-# Pinned llama.cpp release. The ABI mirror in backends/llamacpp/ffi.rs is valid for
-# EXACTLY this tag; bumping one without the other is a silent memory-layout corruption,
-# so the loader refuses to run against a different tag.
+dtype_label = "q8_0"
+# Informational: the llama.cpp vendored by llama-cpp-sys-2 0.1.156, which is what this
+# binary statically links. There is no hand-rolled FFI and no ABI mirror to keep in step
+# (ADR 0002) — llama-cpp-sys-2 regenerates bindings from the tree it compiles, so a
+# version bump cannot silently mismatch the layout.
+#
+# It still matters for GGUF compatibility: the converter and the runtime must agree on the
+# linear-attention V-head order. They do — both the vendored tree and llama.cpp master
+# broadcast with the same tiled `ggml_repeat_4d`, and the golden fixture is what actually
+# proves the pairing rather than this comment.
 native_release = "b11054"
 
 [models."openjev-4b-nli-v2".backends.llamacpp.weights]
 repo = "muthuishere/openjev-gguf"
-file = "openjev-4b-nli-v2-Q5_K_M.gguf"
-sha256 = ""                        # TODO(publish): fill at publish time; empty = unpinned
-size_bytes = 2_900_000_000
+file = "openjev-4b-nli-v2-Q8_0.gguf"
+# Digest of the artefact `scripts/convert-model.sh` produces from the pinned revision
+# above, computed 2026-09-20. It is correct the moment that exact file is uploaded to the
+# repo named here — and until then the download 404s, which is a loud failure rather than
+# a quiet one. An empty digest would be worse: unpinned means a silent swap is
+# undetectable, and that is precisely the failure this field exists to prevent.
+sha256 = "f00d017a1a793f7c43b579a9ec3f6646ad164bbffcfb36d4ee34ad45fbb27332"
+size_bytes = 4_482_394_848

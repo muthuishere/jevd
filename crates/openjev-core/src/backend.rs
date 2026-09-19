@@ -79,8 +79,28 @@ pub struct OpenRequest {
     pub weights: PathBuf,
     pub device: Device,
     pub dtype: Dtype,
+    /// The **total** KV context budget, shared across `max_seqs` sequences — which is
+    /// what llama.cpp's `n_ctx` means. The limit any single input must respect is
+    /// `context / max_seqs`, and the backend enforces that rather than the raw number.
     pub context: usize,
     pub n_threads: Option<usize>,
+    /// How many sequences the backend may decode in one call.
+    ///
+    /// `1` is the v0.1 behaviour: one sequence per `forward`, nothing padded, `!BATCH`.
+    /// Above 1 the backend declares [`Caps::BATCH`] and coalesces, which is worth roughly
+    /// 3-4x at short NLI lengths because a 32-token forward through a 4B model leaves the
+    /// GPU almost entirely idle — the cost is per-call overhead, not arithmetic.
+    ///
+    /// It is a number and not a bool because the KV budget scales with it.
+    pub max_seqs: usize,
+}
+
+impl OpenRequest {
+    /// Sequences per decode, never zero — a zero here would be a divide-by-zero in the
+    /// per-sequence context calculation rather than a sensible "no batching".
+    pub fn max_seqs(&self) -> usize {
+        self.max_seqs.max(1)
+    }
 }
 
 pub trait Backend: Send + Sync {

@@ -287,6 +287,18 @@ pub struct LoadSpec {
     pub device: Option<DeviceArg>,
     pub cache_dir: Option<PathBuf>,
     pub offline: bool,
+    /// Sequences the backend may decode at once.
+    ///
+    /// **Not** wired to `server.max_batch`, tempting as that is. The two mean different
+    /// things: `max_batch` is how many pairs the Engine will coalesce into one `predict`,
+    /// and `max_seqs` is how many of those the backend can decode in one graph. Raising
+    /// `max_seqs` divides the KV budget (`model.context`) across that many sequences, so
+    /// binding it to `max_batch`'s default of 32 would quietly cut the usable context per
+    /// pair from 8192 tokens to 256 and turn long premises into a `ContextOverflow`.
+    ///
+    /// Default 1. Raising it is the single biggest throughput lever measured (see
+    /// `docs/adr/0015`), and it is the operator's call because it costs memory.
+    pub max_seqs: usize,
 }
 
 impl LoadSpec {
@@ -303,6 +315,7 @@ impl LoadSpec {
             },
             cache_dir: cfg.opt_string("model.cache_dir").map(PathBuf::from),
             offline: false,
+            max_seqs: cfg.int("server.max_seqs").max(1) as usize,
         }
     }
 }
@@ -348,6 +361,7 @@ pub fn load_session(
         dtype: None,
         context: None,
         n_threads: None,
+        max_seqs: load.max_seqs,
         offline: load.offline,
     };
     let mut cb = |file: &str, p: Progress| renderer.on(file, p);

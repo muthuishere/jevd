@@ -77,6 +77,7 @@ weights = {{ repo = "r", file = "w.gguf" }}
         dtype: Dtype::Quant("q8_0"),
         context: 8192,
         n_threads: None,
+        max_seqs: env_max_seqs(),
     };
     Some(llamacpp::factory().open(&req).expect("backend must open"))
 }
@@ -84,6 +85,16 @@ weights = {{ repo = "r", file = "w.gguf" }}
 /// Tokenise without a tokenizer.json: the GGUF under test is a *different* checkpoint
 /// from ours, so we feed synthetic token ids. The recurrent-state question is about ids,
 /// not text, and this keeps the test independent of any tokenizer file.
+/// Sequences per decode. Defaults to 1 (the shipping default); set `OPENJEV_MAX_SEQS`
+/// above 1 to run the whole suite against the batching path, which is how batching is
+/// shown to be correct rather than merely fast.
+fn env_max_seqs() -> usize {
+    std::env::var("OPENJEV_MAX_SEQS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+}
+
 fn ids(seed: u32, n: usize) -> Vec<u32> {
     (0..n)
         .map(|i| 1000 + (seed * 97 + i as u32 * 31) % 40000)

@@ -143,12 +143,23 @@ fn session() -> Option<(Session, Golden)> {
         dtype: Dtype::Quant(dtype_label),
         context: 8192,
         n_threads: None,
+        max_seqs: env_max_seqs(),
     };
     let backend = llamacpp::factory().open(&req).expect("backend must open");
     Some((
         Session::new(spec, encoder, head, backend).expect("session"),
         golden,
     ))
+}
+
+/// Sequences per decode. Defaults to 1 (the shipping default); set `OPENJEV_MAX_SEQS`
+/// above 1 to run the whole suite against the batching path, which is how batching is
+/// shown to be correct rather than merely fast.
+fn env_max_seqs() -> usize {
+    std::env::var("OPENJEV_MAX_SEQS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
 }
 
 fn max_abs(a: &[f32], b: &[f32]) -> f32 {

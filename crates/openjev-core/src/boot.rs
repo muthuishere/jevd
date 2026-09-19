@@ -19,6 +19,9 @@ pub struct BootOptions {
     pub dtype: Option<Dtype>,
     pub context: Option<usize>,
     pub n_threads: Option<usize>,
+    /// Sequences the backend may decode at once. `1` keeps v0.1's one-at-a-time path.
+    /// Above 1 the backend declares `Caps::BATCH` and the KV budget scales with it.
+    pub max_seqs: usize,
     pub offline: bool,
 }
 
@@ -30,6 +33,10 @@ impl Default for BootOptions {
             dtype: None,
             context: None,
             n_threads: None,
+            // Batching is opt-in for now: it is a large throughput win (measured ~3x at
+            // 32 tokens) and it changes the KV budget, so it is the operator's call
+            // rather than a default that silently triples resident memory.
+            max_seqs: 1,
             offline: false,
         }
     }
@@ -113,6 +120,7 @@ pub fn boot(
         dtype: resolved.dtype,
         context: opts.context.unwrap_or(spec.context),
         n_threads: opts.n_threads,
+        max_seqs: opts.max_seqs,
     };
     let backend = factory.open(&req)?;
 

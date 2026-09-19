@@ -73,6 +73,11 @@ pub fn defaults() -> BTreeMap<String, toml::Value> {
     set("server.port", V::Integer(crate::cli::DEFAULT_PORT as i64));
     set("server.max_queue", V::Integer(64));
     set("server.max_batch", V::Integer(32));
+    // Sequences the backend decodes in one graph. 1 keeps the shipping behaviour: one
+    // sequence per forward, the full `model.context` available to every pair. Raising it
+    // is worth roughly 3x at short NLI lengths and divides the context budget by the same
+    // number — which is why it is opt-in rather than inherited from `max_batch`.
+    set("server.max_seqs", V::Integer(1));
     set("server.max_body_bytes", V::Integer(1_048_576));
     set("server.max_pairs", V::Integer(256));
     set("server.max_options", V::Integer(512));
