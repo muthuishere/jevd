@@ -41,7 +41,9 @@ const usage = `herdr-jev — answer it, route it, or get out of the way.
   savings             how many tasks never reached an agent
   status [--watch]    openjev phase and model, config in effect, savings
   feed                live decisions (pane entrypoint)
-  doctor [--json]     every check names its own fix
+  doctor [--json] [--probe]
+                      every check names its own fix. --probe additionally reads each
+                      agent binary's own --help and reports what it really accepts.
   skill [--install]   print / symlink the agent skill
   daemon | serve      spawn-mode supervisor
 
@@ -162,7 +164,7 @@ func parse(argv []string) ([]string, map[string]string) {
 
 func takesValue(name string) bool {
 	switch name {
-	case "json", "dry-run", "explain", "watch", "install", "distilled", "force", "wait", "drop", "shadow":
+	case "json", "dry-run", "explain", "watch", "install", "distilled", "force", "wait", "drop", "shadow", "probe":
 		return false
 	}
 	return true

@@ -47,6 +47,9 @@ type Kind struct {
 	EffortValues map[string]string `toml:"effort_values" json:"effort_values"`
 	// FamilyHints rank a model id that matches no configured tier name.
 	FamilyHints map[string]int `toml:"family_hints" json:"family_hints"`
+	// Bin is the executable `doctor --probe` reads help from. Empty means the kind
+	// name, which is what herdr calls the canonical executable.
+	Bin string `toml:"bin" json:"bin"`
 }
 
 // Defaults are the kinds we ship with. Every one of them is overridable in config, and
