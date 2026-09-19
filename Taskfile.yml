@@ -52,6 +52,35 @@ tasks:
     desc: Release binary with the CUDA backend (needs nvcc; compiles llama.cpp)
     cmds: ['cargo build --release -p openjev-cli --features cuda']
 
+  # --- real weights ---------------------------------------------------------
+  # Deliberately outside `check`: these need a converted GGUF, the tokenizer and the
+  # extracted head, and they compile llama.cpp. Produce the artefacts with
+  # `scripts/convert-model.sh <workdir>` and point OPENJEV_ARTEFACTS at <workdir>/out.
+  #
+  # Every test here passes silently when the env is unset, which keeps `check` green on a
+  # machine with no weights — and means CI that intends to enforce the contract must set
+  # OPENJEV_ARTEFACTS. Absence of the fixture is absence of evidence, not evidence of
+  # correctness.
+  golden:
+    desc: The contract — our predict against the reference's probabilities
+    env:
+      OPENJEV_TEST_GGUF: '{{.OPENJEV_ARTEFACTS}}/openjev-4b-nli-v2-{{.Q | default "Q8_0"}}.gguf'
+      OPENJEV_TEST_HEAD: '{{.OPENJEV_ARTEFACTS}}/score.safetensors'
+      OPENJEV_TEST_TOKENIZER: '{{.OPENJEV_TOKENIZER}}'
+      OPENJEV_TEST_DTYPE: '{{.Q | default "Q8_0" | lower}}'
+    cmds:
+      - cargo test --release -p openjev-core --features real-weights,backend-llamacpp
+        --test golden -- --nocapture --test-threads=1
+
+  bench:
+    desc: Latency and throughput on real weights. Reports, never asserts
+    env:
+      OPENJEV_TEST_GGUF: '{{.OPENJEV_ARTEFACTS}}/openjev-4b-nli-v2-{{.Q | default "Q8_0"}}.gguf'
+      OPENJEV_TEST_DTYPE: '{{.Q | default "Q8_0" | lower}}'
+    cmds:
+      - cargo test --release -p openjev-core --features real-weights,backend-llamacpp
+        --test bench -- --nocapture
+
   # --- go -------------------------------------------------------------------
   go:build:
     dir: '{{.PLUGIN}}'
