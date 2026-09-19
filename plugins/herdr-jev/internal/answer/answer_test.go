@@ -8,6 +8,11 @@ import (
 	"github.com/muthuishere/herdr-jev/internal/jev"
 )
 
+// registryEntailLabel is deliberately NOT "entailment". The label set is registry
+// config, so a fake that used the obvious name would be more permissive than the real
+// server — which is how a wrong-answer bug survives a green suite.
+const registryEntailLabel = "entails"
+
 // fake is the whole reason Backend is an interface: every test here runs with no model
 // on disk, no server, and no network.
 type fake struct {
@@ -42,7 +47,8 @@ func (f fake) Predict(_ context.Context, pairs []jev.Pair) ([]jev.Prediction, er
 		if i < len(f.predict) {
 			s = f.predict[i]
 		}
-		out = append(out, jev.Prediction{Index: i, Scores: map[string]float64{"entailment": s}})
+		out = append(out, jev.Prediction{Index: i, EntailmentLabel: registryEntailLabel,
+			Scores: map[string]float64{registryEntailLabel: s, "contra": 1 - s}})
 	}
 	return out, nil
 }
@@ -140,7 +146,8 @@ func TestABrokenBackendNeverBlocks(t *testing.T) {
 
 func TestGradeIsOnlyEverExplicit(t *testing.T) {
 	res := Try(context.Background(),
-		fake{grade: jev.Grade{Pass: true, Scores: map[string]float64{"entailment": 0.93}}},
+		fake{grade: jev.Grade{Pass: true, EntailmentLabel: registryEntailLabel,
+			Scores: map[string]float64{registryEntailLabel: 0.93}}},
 		Request{Task: "the floor is 0.55", GradeReference: "the floor defaults to 0.55", MinConfidence: 0.85})
 	if res.Verdict != VerdictAnswered || res.Answer.Text != "pass" {
 		t.Fatalf("verdict = %s answer = %+v", res.Verdict, res.Answer)

@@ -2,6 +2,7 @@ package route
 
 import (
 	"context"
+	"errors"
 
 	"github.com/muthuishere/herdr-jev/internal/config"
 	"github.com/muthuishere/herdr-jev/internal/herdrapi"
@@ -61,6 +62,18 @@ func (r Router) Rank(ctx context.Context, message string, cands []Candidate) (De
 		options[i] = c.Option
 	}
 	scored, err := r.Reranker.Rerank(ctx, message, options)
+	if errors.Is(err, jev.ErrTooLong) {
+		// The server refuses to truncate (server ADR 0008), so an over-long snapshot
+		// is ours to shrink. Halving the per-pane digest and retrying ONCE is the
+		// right trade here: these options are already a lossy summary of scrollback,
+		// so less of it is a weaker ranking rather than a wrong one — and the floor
+		// and margin still have to be cleared afterwards. Retrying forever, or
+		// silently dropping panes to fit, would both be worse than one weaker pass.
+		for i, c := range cands {
+			options[i] = jev.Fit(c.Option, len(c.Option)/2)
+		}
+		scored, err = r.Reranker.Rerank(ctx, message, options)
+	}
 	if err != nil {
 		return Decision{}, err
 	}

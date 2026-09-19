@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -26,6 +27,11 @@ import (
 // APIVersion is the major this client was built for. A mismatch is refused outright:
 // a client guessing at v2 semantics is worse than a client that stops.
 const APIVersion = 1
+
+// ExitConsentRequired is openjev's exit code for "a download needs permission" (server
+// ADR 0010). It sits deliberately outside design 02's 0-9 table, so it is named here
+// rather than compared as a bare number at a call site.
+const ExitConsentRequired = 77
 
 // DefaultPort is discovery step 4 only — the documented default, not a contract. The
 // port is not the contract; the state file is.
@@ -35,7 +41,29 @@ var (
 	ErrNoServer   = errors.New("no openjev server reachable")
 	ErrNotReady   = errors.New("openjev is running but not ready")
 	ErrAPIVersion = errors.New("openjev api version mismatch")
+	// ErrTooLong is 422 for input the server will not truncate for us (ADR 0008).
+	// Distinct because it is the one error a caller can fix by sending less.
+	ErrTooLong = errors.New("input exceeds the server's limits and the server will not truncate it")
 )
+
+// Retryable reports whether an error is worth trying again shortly, rather than a
+// reason to give up on the backend.
+//
+// `shutting_down` is the one that is easy to get wrong: it is a 503 from a server
+// draining on purpose, not a broken one. Treating it as fatal would turn an ordinary
+// restart into "openjev is dead" in the log. Every caller in this plugin degrades to
+// pass-through either way, so this exists to keep the REPORTING honest.
+func Retryable(err error) bool {
+	var ae *APIError
+	if errors.As(err, &ae) {
+		switch ae.Code {
+		case "queue_full", "model_not_ready", "shutting_down", "timeout", "device_error":
+			return true
+		}
+		return false
+	}
+	return errors.Is(err, ErrNotReady) || errors.Is(err, ErrNoServer)
+}
 
 // Reranker is the seam every test in this repo runs against.
 //
@@ -61,6 +89,11 @@ type APIError struct {
 	Message   string `json:"message"`
 	RequestID string `json:"request_id"`
 	Status    int    `json:"-"`
+	// RetryAfter is the server's own backpressure signal, honoured rather than
+	// guessed at. The server runs ONE inference worker (server ADR 0005), so
+	// concurrency here is admission control, not parallelism: retrying faster than
+	// asked just refills a queue that is already full.
+	RetryAfter time.Duration `json:"-"`
 }
 
 func (e *APIError) Error() string {
@@ -81,11 +114,28 @@ type Info struct {
 		MaxOptions    int `json:"max_options"`
 		MaxFieldChars int `json:"max_field_chars"`
 	} `json:"limits"`
-	Model struct {
-		Ref      string `json:"ref"`
-		Revision string `json:"revision"`
-		Device   string `json:"device"`
-	} `json:"model"`
+	// Model is absent until the weights are loaded, which is why it is a pointer:
+	// an empty struct would report a server with no model as one running "".
+	Model *ModelInfo `json:"model"`
+	Phase string     `json:"phase"`
+}
+
+// ModelInfo is GET /v1/model, and also rides inside /v1/info once weights are resident.
+//
+// EntailmentLabel is the load-bearing field. The label set and its ORDER are registry
+// config, so "which of these probabilities means entailment" is a question only the
+// server can answer. Assuming a name, or an index, yields contradiction probabilities
+// dressed as entailment — a confident, exactly-inverted answer that every confidence bar
+// in this plugin would wave through.
+type ModelInfo struct {
+	Model          string   `json:"model"`
+	Revision       string   `json:"revision"`
+	Device         string   `json:"device"`
+	Dtype          string   `json:"dtype"`
+	Backend        string   `json:"backend"`
+	Context        int      `json:"context"`
+	Labels         []string `json:"labels"`
+	EntailmentLabel string  `json:"entailment_label"`
 }
 
 // Readiness is /readyz. The phase split matters: "downloading 7.9 GB" and "loading
@@ -142,6 +192,7 @@ type Client struct {
 	// an attached server is never ours to signal.
 	spawned *exec.Cmd
 	limits  *Info
+	entail  string // resolved entailment label, cached for the process lifetime
 }
 
 // Discover implements the ordered discovery of docs/design/02 §6.1, stopping at the
@@ -268,6 +319,31 @@ func (c *Client) Info(ctx context.Context) (Info, error) {
 	return info, nil
 }
 
+// EntailmentLabel asks the server which score key means entailment.
+//
+// Cached, because it cannot change under a running server: the label set belongs to the
+// loaded model. Resolved from /v1/info's embedded model when the weights are already
+// resident, and from /v1/model otherwise — /v1/model is 503 `model_not_ready` until the
+// weights load, and that is a real state rather than an error worth failing on.
+//
+// An empty return is honest and safe: every reader degrades to 0, which refuses an
+// answer and discards a classification. The alternative — defaulting to "entailment" —
+// is a coin flip on a registry we do not control, and it loses silently.
+func (c *Client) EntailmentLabel(ctx context.Context) string {
+	if c.entail != "" {
+		return c.entail
+	}
+	if info, err := c.Info(ctx); err == nil && info.Model != nil && info.Model.EntailmentLabel != "" {
+		c.entail = info.Model.EntailmentLabel
+		return c.entail
+	}
+	var m ModelInfo
+	if err := c.getJSON(ctx, "/v1/model", &m); err == nil {
+		c.entail = m.EntailmentLabel
+	}
+	return c.entail
+}
+
 // MaxOptions is the server's ceiling, with a conservative fallback when /v1/info is
 // unavailable. Never a hardcoded 512.
 func (c *Client) MaxOptions(ctx context.Context) int {
@@ -276,6 +352,37 @@ func (c *Client) MaxOptions(ctx context.Context) int {
 		return 64
 	}
 	return info.Limits.MaxOptions
+}
+
+// Fit bounds a string so a request stays inside the server's published limits.
+//
+// This exists because the server will NOT truncate for us: `truncate: "tail"` is
+// refused with 422 (server ADR 0008), on the grounds that character truncation of a
+// templated, tokenised pair is a plausible-looking lie. That reasoning is right, and it
+// does not go away for us — so Fit is NOT a client-side reimplementation of the thing
+// the server declined to do.
+//
+// The distinction is what the text IS. Fit is only ever applied to material we already
+// built as a lossy digest — a pane's recent scrollback, capped and de-noised — where
+// "the last N characters" is already the shape of the content and shortening it further
+// loses nothing the ranking depended on. It is never applied to a user's question, a
+// claim under test, or a caller's option: those go whole or not at all, and an
+// over-long one is a 422 the caller must see.
+//
+// The margin is deliberate. max_field_chars is a CHARACTER bound and the real ceiling is
+// tokens, so sitting exactly on it is how a request that measured fine gets refused.
+func Fit(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	keep := max - max/8 // ~12% headroom for the template and tokeniser
+	if keep <= 0 {
+		keep = max
+	}
+	if len(s) <= keep {
+		return s
+	}
+	return s[len(s)-keep:] // the tail is the recent, diagnostic part
 }
 
 // MaxFieldChars is the per-field ceiling distillation truncates to.
@@ -338,7 +445,37 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 	return c.do(req, out)
 }
 
+// postJSON sends one request, honouring the server's backpressure ONCE.
+//
+// The server runs a single inference worker behind a bounded queue (server ADR 0005), so
+// a 429 means "the queue is full", not "something went wrong". One bounded wait on the
+// server's own Retry-After is the honest response: it is the difference between riding
+// out a busy moment and giving up on a healthy server. We do not loop — a router that
+// retries indefinitely turns admission control into a latency spike, and every caller
+// here already degrades to pass-through.
 func (c *Client) postJSON(ctx context.Context, path string, body []byte, out any) error {
+	err := c.postOnce(ctx, path, body, out)
+
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.Code != "queue_full" {
+		return err
+	}
+	wait := ae.RetryAfter
+	if wait <= 0 {
+		wait = time.Second
+	}
+	if wait > 5*time.Second {
+		wait = 5 * time.Second // the caller has its own budget; never blow it here
+	}
+	select {
+	case <-ctx.Done():
+		return err
+	case <-time.After(wait):
+	}
+	return c.postOnce(ctx, path, body, out)
+}
+
+func (c *Client) postOnce(ctx context.Context, path string, body []byte, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.URL+path, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -367,6 +504,14 @@ func (c *Client) do(req *http.Request, out any) error {
 		if json.Unmarshal(body, &env) == nil && env.Error.Code != "" {
 			e := env.Error
 			e.Status = resp.StatusCode
+			if ra := resp.Header.Get("Retry-After"); ra != "" {
+				if secs, perr := strconv.Atoi(ra); perr == nil {
+					e.RetryAfter = time.Duration(secs) * time.Second
+				}
+			}
+			if e.Code == "unprocessable" {
+				return fmt.Errorf("%w: %s", ErrTooLong, e.Message)
+			}
 			return &e
 		}
 		return fmt.Errorf("openjev %s: HTTP %d", req.URL.Path, resp.StatusCode)
@@ -392,6 +537,14 @@ func Spawn(ctx context.Context, bin, model, stateFile string, timeout time.Durat
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Stderr = os.Stderr // logs are stderr; stdout carries exactly one JSON line
+	// Consent for a first-ever weight download is CLI-side and requires a TTY
+	// (server ADRs 0006/0010). A supervised child is never a TTY, so without this a
+	// first run exits 77 with nothing downloaded and no prompt anyone could have
+	// answered. Spawning a server IS the decision to let it fetch its weights —
+	// making that explicit here is what turns exit 77 from a dead end into a
+	// download. An attached server is unaffected: this only ever applies to a child
+	// we chose to start.
+	cmd.Env = append(os.Environ(), "OPENJEV_ASSUME_YES=1")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -428,6 +581,14 @@ func Spawn(ctx context.Context, bin, model, stateFile string, timeout time.Durat
 		}
 		return &Client{URL: strings.TrimRight(r.URL, "/"), HTTP: &http.Client{Timeout: timeout}, spawned: cmd}, nil
 	case err := <-errs:
+		// 77 is outside design 02's 0-9 table and means "it wants permission to
+		// download" (server ADR 0010). We set OPENJEV_ASSUME_YES above, so seeing
+		// it here means the binary is older than that env var — which is a fix a
+		// human can act on, not a mystery.
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == ExitConsentRequired {
+			return nil, fmt.Errorf("openjev exited 77: it wants consent to download the model, and a supervised child has no TTY to ask. Run `%s model pull --yes` once, or upgrade openjev so it honours OPENJEV_ASSUME_YES", bin)
+		}
 		return nil, err
 	case <-ctx.Done():
 		_ = cmd.Process.Kill()
@@ -477,11 +638,26 @@ type Prediction struct {
 	Index  int                `json:"index"`
 	Label  string             `json:"label"`
 	Scores map[string]float64 `json:"scores"`
+
+	// EntailmentLabel is which key of Scores means entailment, as the SERVER
+	// reported it. It is set by the client from /v1/model, never assumed: the
+	// registry chooses both the label names and their order, so neither the string
+	// "entailment" nor index 1 is a fact about anything.
+	EntailmentLabel string `json:"-"`
 }
 
-// Entailment is P(entailment), the calibrated probability the whole policy reads as a
-// confidence. Absent scores read as 0 rather than as a confident no.
-func (p Prediction) Entailment() float64 { return p.Scores["entailment"] }
+// Entailment is P(entailment), the calibrated probability every bar in this plugin
+// reads as a confidence.
+//
+// It returns 0 when the label is unknown or absent, and that is deliberate: 0 makes a
+// boolean refuse and a classification degrade, whereas any guess here would be an
+// inverted answer delivered with full confidence.
+func (p Prediction) Entailment() float64 {
+	if p.EntailmentLabel == "" {
+		return 0
+	}
+	return p.Scores[p.EntailmentLabel]
+}
 
 // Predict runs NLI over premise/hypothesis pairs.
 //
@@ -492,12 +668,26 @@ func (c *Client) Predict(ctx context.Context, pairs []Pair) ([]Prediction, error
 	if len(pairs) == 0 {
 		return nil, nil
 	}
-	body, _ := json.Marshal(map[string]any{"pairs": pairs, "truncate": "tail"})
+	// truncate is "error", never "tail". The server REFUSES "tail" with 422
+	// `unprocessable` (server ADR 0008): core owns tokenisation and exposes no
+	// truncating encode, so character-level truncation would be a plausible-looking
+	// lie — the template wraps the text, the tokenizer is not a character counter,
+	// and getting it slightly wrong yields a confident, wrong, unfalsifiable label.
+	//
+	// The consequence is ours to carry: the server will not shorten anything, so WE
+	// keep requests inside the published limits. See Client.Fit.
+	body, _ := json.Marshal(map[string]any{"pairs": pairs, "truncate": "error"})
 	var out struct {
 		Results []Prediction `json:"results"`
 	}
 	if err := c.postJSON(ctx, "/v1/predict", body, &out); err != nil {
 		return nil, err
+	}
+	// Stamp the server's own entailment label onto every result, so no caller
+	// anywhere has to know — or guess — which key it is.
+	label := c.EntailmentLabel(ctx)
+	for i := range out.Results {
+		out.Results[i].EntailmentLabel = label
 	}
 	return out.Results, nil
 }
@@ -508,11 +698,25 @@ type Grade struct {
 	Scores    map[string]float64 `json:"scores"`
 	Pass      bool               `json:"pass"`
 	Threshold float64            `json:"threshold"`
+
+	// EntailmentLabel is set by the client from /v1/model, for the same reason as on
+	// Prediction. `Pass` is the server's own verdict and is authoritative; this is
+	// only for reporting the probability behind it.
+	EntailmentLabel string `json:"-"`
+}
+
+// Entailment is the probability behind Pass. Zero when the label is unknown.
+func (g Grade) Entailment() float64 {
+	if g.EntailmentLabel == "" {
+		return 0
+	}
+	return g.Scores[g.EntailmentLabel]
 }
 
 func (c *Client) Grade(ctx context.Context, answer, reference string, threshold float64) (Grade, error) {
 	var g Grade
 	body, _ := json.Marshal(map[string]any{"answer": answer, "reference": reference, "threshold": threshold})
 	err := c.postJSON(ctx, "/v1/grade", body, &g)
+	g.EntailmentLabel = c.EntailmentLabel(ctx)
 	return g, err
 }

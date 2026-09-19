@@ -12,6 +12,11 @@ import (
 	"github.com/muthuishere/herdr-jev/internal/policy"
 )
 
+// registryEntailLabel is deliberately NOT "entailment". The label set is registry
+// config, so a fake that used the obvious name would be more permissive than the real
+// server — which is how a wrong-answer bug survives a green suite.
+const registryEntailLabel = "entails"
+
 // fake serves the tier question (3 options), the effort rubric (4 options), any
 // pick-one, and the boolean/risky predicts — enough to drive all three stages with no
 // model on disk.
@@ -58,7 +63,8 @@ func (f fake) Predict(_ context.Context, pairs []jev.Pair) ([]jev.Prediction, er
 				s = f.boolean[i]
 			}
 		}
-		out = append(out, jev.Prediction{Index: i, Scores: map[string]float64{"entailment": s}})
+		out = append(out, jev.Prediction{Index: i, EntailmentLabel: registryEntailLabel,
+			Scores: map[string]float64{registryEntailLabel: s, "contra": 1 - s}})
 	}
 	return out, nil
 }

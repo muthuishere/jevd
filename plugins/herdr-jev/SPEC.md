@@ -72,12 +72,42 @@ Checked against a live Herdr 0.9.x server on 2026-09-19:
   `HERDR_PLUGIN_ROOT`, `HERDR_PLUGIN_CONFIG_DIR`, `HERDR_PLUGIN_STATE_DIR`,
   `HERDR_PANE_ID`.
 
-openjev, from `docs/design/02-api-and-cli.md`, which wins on any conflict:
+openjev, from `docs/design/02-api-and-cli.md` **and the server's own ADRs, which win
+where the built server diverged from the design**:
+
+- **`truncate: "tail"` is REFUSED with 422 `unprocessable`** (server ADR 0008). Only
+  `"error"` works: core owns tokenisation and exposes no truncating encode, and
+  character truncation of a templated pair would be a plausible-looking lie. **The
+  server will not shorten anything for us, so we keep requests inside the published
+  limits ourselves** — which matters most for pane snapshots, where inputs get long.
+- **Which score key means entailment is `entailment_label` from `/v1/model`.** The label
+  set and its ORDER are registry config, so neither the string `"entailment"` nor index
+  1 is a fact about anything. Assuming either yields contradiction probabilities dressed
+  as entailment — a confidently inverted answer that every bar in this plugin would wave
+  through. Unresolved reads as 0, which refuses rather than guesses.
+- **Pair orientation is the server's business, and it is `(premise = option, hypothesis =
+  question)` for rerank and `(premise = reference, hypothesis = answer)` for grade.** We
+  send the named fields and never construct pairs for those two endpoints.
+- **Error code `shutting_down` (503)** exists beyond the design's table: a server
+  draining on purpose, so retryable, never fatal.
+- **One inference worker, admission-controlled** (server ADR 0005). Concurrency here is
+  admission control, not parallelism: fanning out in parallel just fills the queue and
+  earns 429 `queue_full` + `Retry-After`. We issue chunks sequentially and honour
+  Retry-After once.
+- **Consent for a first download is CLI-side and needs a TTY; it exits 77** (server ADRs
+  0006/0010). A supervised child is never a TTY, so a spawned first run would exit 77
+  with nothing downloaded. Spawning sets `OPENJEV_ASSUME_YES=1`, and `doctor` names
+  `openjev model pull --yes` rather than reporting a dead server.
+- `/v1/info`'s `model` is **absent until weights are resident**, so it is optional, not
+  an empty struct.
+
+And, unchanged and safe to rely on:
 
 - `POST /v1/rerank` `{question, options[], top_k?, return_documents?}` →
-  `{results:[{rank,index,score}]}`. `POST /v1/predict` `{pairs:[{premise,hypothesis}]}`
-  → `{results:[{label, scores{contradiction,entailment,neutral}}]}` in request order.
-  `POST /v1/grade` `{answer, reference, threshold}` → `{label, scores, pass}`.
+  `{results:[{rank,index,score}]}`. `POST /v1/predict` `{pairs:[{premise,hypothesis}],
+  truncate:"error"}` → `{results:[{label, scores{<registry labels>}}]}` in request order.
+  `POST /v1/grade` `{answer, reference, threshold}` → `{label, scores, pass}`, where
+  `pass` is the server's own verdict against the label it knows is entailment.
 - `GET /readyz` distinguishes `starting|resolving|downloading|loading|ready|draining|
   failed`, with bytes and ETA while downloading. `/healthz` stays 200 throughout. **A
   router that reports only "not ready" during a four-minute first-run download gets
@@ -516,7 +546,13 @@ require a rebuild.
   recognised.
 - `doctor --probe` reports ACCEPTED / REJECTED / `??` per mapping, never renders `??` as a
   pass, never edits config, and is bounded by its timeout even against a binary that hangs.
-- `go vet ./...`, `go build ./...` and `go test ./...` clean.
+- Predict never sends `truncate:"tail"`; an over-long rerank shrinks once and retries.
+- Entailment is read by the server's `entailment_label`, and a registry that calls it
+  anything else still works. Unresolved reads as 0, never a guess.
+- `shutting_down` and `queue_full` are retryable; a single `queue_full` is ridden out
+  once on the server's own Retry-After, never in a loop.
+- `go vet ./...`, `go build ./...` and `go test ./...` clean, with fakes that match the
+  real server's shapes rather than convenient ones.
 
 ## 12. Out of scope
 

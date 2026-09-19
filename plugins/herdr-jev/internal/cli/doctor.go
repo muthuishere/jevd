@@ -93,7 +93,14 @@ func doctor(flags map[string]string) error {
 	if berr != nil {
 		fix := "start it: openjev serve"
 		if cfg.OpenJEV.Mode == "spawn" {
-			fix = "check openjev.bin in " + config.Path() + "; `openjev --version` must work"
+			// The un-downloaded-model case is the one that looks like a dead
+			// server and is not. Consent for a first download is CLI-side and
+			// needs a TTY (server ADRs 0006/0010); a supervised child has none, so
+			// a first-ever spawn exits 77 having downloaded nothing. Reporting
+			// that as "unreachable" sends someone debugging sockets.
+			fix = "if openjev has never downloaded its weights here, a supervised child cannot ask for consent: run `" +
+				cfg.OpenJEV.Bin + " model pull --yes` once (exit 77 means exactly this). Otherwise check openjev.bin in " +
+				config.Path() + "; `" + cfg.OpenJEV.Bin + " --version` must work"
 		}
 		add(check{Name: "openjev", OK: false, Detail: berr.Error(), Fix: fix})
 	} else {
@@ -116,8 +123,25 @@ func doctor(flags map[string]string) error {
 			add(check{Name: "openjev api", OK: false, Detail: ierr.Error(), Fix: "upgrade whichever of openjev or herdr-jev is older; this client speaks v" +
 				fmt.Sprint(jev.APIVersion)})
 		} else {
+			model, device := "(not loaded yet)", "?"
+			if info.Model != nil {
+				model, device = info.Model.Model, info.Model.Device
+			}
 			add(check{Name: "openjev api", OK: true, Detail: fmt.Sprintf("v%d · %s on %s · max_options %d",
-				info.APIVersion, info.Model.Ref, info.Model.Device, info.Limits.MaxOptions), Fix: ""})
+				info.APIVersion, model, device, info.Limits.MaxOptions), Fix: ""})
+
+			// Which score key means entailment is registry config, so it is a fact
+			// only the server has. Without it every probability this plugin reads is
+			// zero — every answer refused, every classification discarded — and that
+			// degradation is silent by design. It is worth its own check.
+			if label := client.EntailmentLabel(ctx()); label != "" {
+				add(check{Name: "entailment label", OK: true,
+					Detail: "server reports " + label + "; scores are read by that key, never a guessed one", Fix: ""})
+			} else {
+				add(check{Name: "entailment label", OK: false,
+					Detail: "the server has not reported one yet, so every probability would read as zero",
+					Fix:    "wait for the model to finish loading; /v1/model is 503 model_not_ready until weights are resident"})
+			}
 		}
 	}
 

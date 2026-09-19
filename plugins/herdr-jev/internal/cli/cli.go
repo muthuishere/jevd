@@ -460,9 +460,10 @@ func statusCmd(flags map[string]string) error {
 			out["url"] = client.URL
 			r, _ := client.Ready(ctx())
 			out["phase"] = r.Human()
-			if info, ierr := client.Info(ctx()); ierr == nil {
-				out["model"] = info.Model.Ref
+			if info, ierr := client.Info(ctx()); ierr == nil && info.Model != nil {
+				out["model"] = info.Model.Model
 				out["device"] = info.Model.Device
+				out["entailment_label"] = info.Model.EntailmentLabel
 			}
 		}
 		records, _ := dispatch.Read(config.JournalPath(), 0)
@@ -472,7 +473,7 @@ func statusCmd(flags map[string]string) error {
 			return printJSON(out)
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		for _, k := range []string{"mode", "url", "phase", "model", "device", "openjev",
+		for _, k := range []string{"mode", "url", "phase", "model", "device", "entailment_label", "openjev",
 			"answer_enabled", "answer_shadow", "answer_bar", "upgrade_bar", "downgrade_bar"} {
 			if v, ok := out[k]; ok {
 				fmt.Fprintf(w, "%s\t%v\n", k, v)

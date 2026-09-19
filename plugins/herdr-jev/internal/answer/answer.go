@@ -219,7 +219,9 @@ func grade(ctx context.Context, b Backend, req Request) (*Answer, error) {
 	if err != nil {
 		return nil, err
 	}
-	ent := g.Scores["entailment"]
+	// The server's own `pass` is authoritative — it applied the threshold against the
+	// label IT knows is entailment. We only read the probability to report it.
+	ent := g.Entailment()
 	text := "fail"
 	conf := 1 - ent
 	if g.Pass {
