@@ -270,7 +270,18 @@ impl LlamaCppBackend {
 
         let info = BackendInfo {
             name: NAME,
-            version: concat!("llama-cpp-2 ", env!("CARGO_PKG_VERSION")).to_string(),
+            // `CARGO_PKG_VERSION` here is *openjev-core's* version, so the banner used to
+            // read "llama-cpp-2 0.1.0" — a version llama-cpp-2 has never had, printed on
+            // every startup line and into every bug report. The registry's
+            // `native_release` is the llama.cpp build that was actually linked, which is
+            // the thing a bug report needs to name.
+            version: req
+                .spec
+                .backends
+                .get(NAME)
+                .and_then(|b| b.native_release.clone())
+                .map(|r| format!("llama.cpp {r}"))
+                .unwrap_or_else(|| "llama.cpp (unknown build)".to_string()),
             device: req.device,
             dtype: req.dtype,
             context: req.context,
