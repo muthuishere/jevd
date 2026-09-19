@@ -62,7 +62,9 @@ var generativeVerbs = []string{
 	"run", "execute", "install", "deploy", "migrate", "commit", "push", "merge",
 	"debug", "investigate", "explain", "summarise", "summarize", "describe",
 	"review", "draft", "design", "plan", "port", "translate", "rewrite", "test",
-	"analyse", "analyze", "document", "set up", "clean up", "look into", "figure out",
+	"analyse", "analyze", "document", "profile", "benchmark", "optimise", "optimize",
+	"bump", "revert", "upgrade", "downgrade", "wire", "hook",
+	"set up", "clean up", "look into", "figure out",
 }
 
 // interrogativeLeads are the openers of a genuine yes/no question. A question mark
