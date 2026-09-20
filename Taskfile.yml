@@ -4,9 +4,6 @@ version: '3'
 # different clocks, so nothing here builds "everything" by default. `task check`
 # is what CI runs and what you run before pushing.
 
-vars:
-  PLUGIN: plugins/herdr-jev
-
 tasks:
   default:
     cmds: [task: check]
@@ -17,8 +14,6 @@ tasks:
       - task: rust:fmt
       - task: rust:clippy
       - task: rust:test
-      - task: go:vet
-      - task: go:test
 
   # --- rust -----------------------------------------------------------------
   # The default feature set deliberately excludes every llama.cpp backend: the
@@ -81,30 +76,7 @@ tasks:
       - cargo test --release -p openjev-core --features real-weights,backend-llamacpp
         --test bench -- --nocapture
 
-  # --- go -------------------------------------------------------------------
-  go:build:
-    dir: '{{.PLUGIN}}'
-    cmds: ['./scripts/build.sh']
-
-  go:vet:
-    dir: '{{.PLUGIN}}'
-    cmds: ['go vet ./...']
-
-  go:test:
-    dir: '{{.PLUGIN}}'
-    cmds: ['go test ./...']
-
   # --- dev ------------------------------------------------------------------
   serve:
     desc: Run the server from source
     cmds: ['cargo run -p openjev-cli -- serve {{.CLI_ARGS}}']
-
-  plugin:link:
-    desc: Register this checkout with herdr for development
-    dir: '{{.PLUGIN}}'
-    cmds:
-      - ./scripts/build.sh
-      - herdr plugin link "$(pwd)"
-
-  plugin:unlink:
-    cmds: ['herdr plugin unlink dev.deemwar.herdr-jev']

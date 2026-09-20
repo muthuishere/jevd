@@ -1,48 +1,59 @@
-# my-jev
+# jevd
 
-Three things in one repo, around one idea: a small NLI cross-encoder is a good enough
-decision primitive that you can route, rank and judge with it instead of prompting a
-chat model and hoping.
+An inference server for [openjev](https://huggingface.co/AlexWortega/openjev), a small
+NLI cross-encoder: premise and hypothesis in, probabilities over `contradiction` /
+`entailment` / `neutral` out.
 
-The model is [openjev](https://huggingface.co/AlexWortega/openjev) — it reads a premise
-and a hypothesis and returns probabilities over `contradiction` / `entailment` / `neutral`.
-One primitive, no task-specific training, and cheap enough to sit in a hot path.
+One primitive, no task-specific training, and cheap enough to sit in a hot path. It is
+a good enough decision engine that you can rank, route, gate and grade with it instead
+of prompting a chat model and hoping.
 
-| component | what it is |
+```sh
+openjev serve
+```
+
+First run says what it is about to download and how big it is *before* it downloads
+anything. The server reports *downloading* and *loading* as different states, so a
+supervisor cannot kill a slow model load.
+
+| crate | what |
 | --- | --- |
-| `crates/openjev-core` | Rust library: model acquisition, device selection, inference. `predict` / `rerank` / `grade` |
-| `crates/openjev-cli` | the `openjev` binary. `openjev serve` downloads on first run, then serves HTTP |
-| `plugins/herdr-jev` | Go [Herdr](https://herdr.dev) plugin: a semantic router for panes |
+| `openjev-core` | model acquisition, device selection, inference. `predict` / `rerank` / `grade` |
+| `openjev-cli` | the `openjev` binary and the HTTP API |
 
-## openjev serve
+## Engine
 
-One command, no prerequisites. The first run says what it is about to download and how
-big it is before it downloads anything, and the server reports *downloading* and *loading*
-as different states so a supervisor cannot kill a slow model load.
+llama.cpp as the trunk only — hidden states out — with the three-label head applied in
+Rust from a small safetensors. Keeping the classifier out of GGUF means every backend's
+contract is one method, `forward(batch) -> last hidden state`, and everything else is a
+free function that backends cannot disagree about.
 
-The HTTP API is the public interface. Herdr is entirely optional — nothing in the engine
-knows it exists.
+CPU, Metal, CUDA, Vulkan and ROCm are cargo features over one codebase. The device is
+detected, with an explicit override and a logged demotion chain; a device whose backend
+was not compiled in fails loudly naming the missing feature rather than quietly falling
+back.
 
-## herdr-jev
+**A model is config, not code.** An embedded registry plus `~/.config/openjev/models.toml`
+carries the repo, revision, template, label map, tokenizer and head shape, so a different
+checkpoint — or later a different architecture — is an edit, not a release.
 
-When you send a message to an agent, the pane that happens to be focused is rarely the
-pane that should get it. herdr-jev snapshots every pane, asks openjev to rank them against
-the message, and delivers to the best match.
+## Verified
 
-Herdr has no `UserPromptSubmit` hook — its event stream is observation-only, and
-`agent_prompted` is the response to `agent.prompt`, not an event you can intercept. So the
-plugin does not intercept the submit path; it **owns** one.
+100% label agreement (35/35) against reference `transformers` outputs at every
+quantisation level, with token ids matching exactly. Q8_0 is both the most accurate quant
+and the fastest, so there is no accuracy/speed trade to make.
 
-Below a configured confidence floor it holds the message and asks. Routing confidently to
-the wrong agent is the failure the whole design is organised against.
+See `STATUS.md` for the numbers, `docs/design/` for the decisions and what each is
+organised against, and `docs/adr/` for how they changed.
 
-## Design
+## Using it
 
-`docs/design/` carries the decisions and what each is organised against; `docs/adr/`
-records changes to them.
+The HTTP API is the whole interface. Nothing in the engine knows about any particular
+client.
 
-## Status
-
-Early. Nothing here is released yet.
+A Herdr plugin was built on it — a three-way dispatcher that answers decision-shaped
+tasks locally, routes the rest to an agent at the right model tier, and passes anything
+uncertain straight through. It lives outside this repo; the engine deliberately carries
+no knowledge of it.
 
 MIT.
