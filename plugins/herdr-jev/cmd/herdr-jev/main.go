@@ -13,4 +13,16 @@ import (
 	"github.com/muthuishere/herdr-jev/internal/cli"
 )
 
-func main() { os.Exit(cli.Main(os.Args[1:])) }
+// Stamped at build time by scripts/build.sh with -ldflags "-X main.version=...".
+// A binary that cannot say which build it is cannot be bisected against a bad routing
+// decision, and routing decisions are the thing this plugin is judged on.
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildDate = "unknown"
+)
+
+func main() {
+	cli.Version, cli.Commit, cli.BuildDate = version, commit, buildDate
+	os.Exit(cli.Main(os.Args[1:]))
+}

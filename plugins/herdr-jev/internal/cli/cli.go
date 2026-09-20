@@ -45,6 +45,7 @@ const usage = `herdr-jev — answer it, route it, or get out of the way.
                       every check names its own fix. --probe additionally reads each
                       agent binary's own --help and reports what it really accepts.
   skill [--install]   print / symlink the agent skill
+  version             the build this binary is
   daemon | serve      spawn-mode supervisor
 
   route <message>     SECONDARY: deliver a message to whichever OPEN pane it was for
@@ -52,6 +53,13 @@ const usage = `herdr-jev — answer it, route it, or get out of the way.
   hold list | resolve <id> --to <n|pane> | --drop
 
 Every verb takes --json.`
+
+// Build identity, set from main. See cmd/herdr-jev/main.go.
+var (
+	Version   = "dev"
+	Commit    = "unknown"
+	BuildDate = "unknown"
+)
 
 // Main is the entry point. It returns an exit code rather than calling os.Exit so the
 // verbs stay testable.
@@ -83,6 +91,8 @@ func Main(argv []string) int {
 		err = doctor(flags)
 	case "skill":
 		err = skill(flags)
+	case "version", "--version", "-v":
+		err = versionCmd(flags)
 	case "daemon":
 		err = daemonCmd()
 	case "serve":
