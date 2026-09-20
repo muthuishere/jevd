@@ -82,8 +82,9 @@ Q8_0, Metal, M5 Pro, warm, one worker, `tests/bench.rs`:
 | 128 | 84 ms | 84 ms | 11.9 |
 | 512 | 272 ms | 277 ms | 3.7 |
 
-Inside the 8–18 pairs/s band the earlier estimate predicted for a 4B. Cost is roughly
-**50 ms fixed + 0.45 ms/token**.
+Inside the 8–18 pairs/s band the earlier estimate predicted for a 4B. The
+"50 ms fixed + 0.45 ms/token" model fitted to three points is wrong in the middle: the real
+curve is 20 ms at one token, a step between 8 and 12, then flat to 48. See ADR 0017.
 
 CPU (same Q8_0, all cores): **2.3 pairs/s** at 32 tokens, 0.3 at 512 — 7x and 13x slower
 than Metal. CPU is a fallback, not a deployment target. CUDA and Vulkan remain unexercised.
@@ -102,44 +103,125 @@ because dequantisation is work too. **Q8_0 dominates: most accurate of the quant
 options and the fastest.** The usual accuracy-for-speed trade is simply not on offer on
 this architecture, which is the same fact ADR 0015 reaches from the batching side.
 
-### What was optimised, and what it bought
+### Where the 61 ms goes — profiled, not guessed (ADR 0017)
 
-**Batching: implemented, correct, and worth nothing.** (ADR 0015.)
+The denominator got measured first, because ADR 0015 asserted "we are at this GPU's rate"
+against a number nobody had taken. `task bench:hw` (`scripts/metal-peak.swift`, MPS on real
+buffers, best of 5) on this M5 Pro:
 
-| tokens | max_seqs=1 | 8 | 16 | 32 |
-| --- | --- | --- | --- | --- |
-| 32 | 16.3 | 16.5 | 15.7 | 15.8 |
-| 128 | 11.9 | 11.5 | 11.9 | 12.1 |
-| 512 | 3.7 | 3.6 | 3.4 | — |
+| | |
+| --- | --- |
+| fp16 matmul, M=4096 | **31.0 – 31.4 TFLOP/s** |
+| fp16 matmul, **M=32** (an NLI pair) | **7.1 – 9.6 TFLOP/s** |
+| memory bandwidth (blit) | **267 – 271 GB/s** |
 
-The flat baseline looked like per-call overhead waiting to be reclaimed. It was not.
-Batching is a win for *generation*, where emitting one token is memory-bound and the
-arithmetic units idle. An NLI *prefill* is a real matmul against every weight in the model
-and is already compute-bound at ~4 TFLOP/s sustained — eight sequences take eight times as
-long because there was never any idle capacity to fill.
+So "4 TFLOP/s is the right order for this GPU" was **false** — it does 31. What is true is
+that 31 is not on offer at M=32, where even Apple's own kernels give 7–9. The ceiling is
+the shape of an NLI pair, not the quality of the kernel.
 
-The code stays, defaulted off via `server.max_seqs`, because it is *proven correct*: at
-`max_seqs=16` the entire golden suite passes with results identical to the unbatched path.
-That is a real demonstration that llama.cpp keeps a separate gated-DeltaNet state per
-`seq_id`, and it is one flag away on any machine where the GPU is genuinely underfed.
+**A one-token forward costs 20 ms, and that is the floor.** 4.16 GiB of weights cross the
+bus once whatever you ask: 4.47 GB / 19.8 ms = **226 GB/s, 85% of measured peak**. You
+cannot answer with a 4B model without reading a 4B model.
 
-`n_ctx` turned out to be a memory lever, not a speed one: 8192 and 16384 measure the same.
+**pp32 at 56.5 ms is 94% accounted for:**
+
+```
+weight streaming   4.47 GB / 267 GB/s                  = 16.7 ms
+arithmetic         2 x 4.21e9 x 32 FLOP / 7.4 TFLOP/s  = 36.4 ms
+                                                 total = 53.1 ms   (measured 56.5)
+```
+
+openjev adds 3.8 ms on top of llama.cpp's own number for the identical shape — batch build,
+memory clear, embedding copy, head. The head is `[3,2560] x [2560]`: 15 kFLOP, four
+nanoseconds. There is no pool of waste anywhere in this path.
+
+**Tokens 12 to 48 are free.** `tests/bench.rs` now reports the decomposition
+(`report_where_the_milliseconds_go`, p50 of 30 warm forwards):
+
+| tokens | 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128 | 256 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| p50 ms | **22.2** | 22.8 | 24.2 | 30.2 | 59.2 | **60.0** | 65.5 | 80.8 | 128.9 |
+
+16 and 32 tokens cost the same; the marginal cost across that span is **-0.2 ms/token**.
+The step is between 8 and 12. A shorter hypothesis buys 2x below ~12 tokens and *nothing at
+all* from 12 to 48 — and the golden fixture's median pair is 20 tokens, squarely inside the
+flat region. Above 48 the marginal cost climbs to its 0.58 ms/token asymptote.
+
+**Three knobs were swept and all three are flat**, and all three were reverted:
+
+| knob | result |
+| --- | --- |
+| `n_ubatch` 256 / 512 / 1024 / 4096 / 16384 | flat within noise; the largest is 2% *worse* |
+| flash attention on/off, pp32 | 567.0 vs 564.7 t/s — only 8 of 32 layers attend, over 32 tokens |
+| pooling `Last` vs `None` + manual read | no difference outside thermal drift |
+
+**The realistic best for one 32-token pair on this trunk is ~50 ms.** Against 61 ms today
+that is an 18% prize, and it would have to be won inside ggml-metal. **61 ms is the floor
+for 4B on this hardware, to within 20%.**
+
+### Batching: flat for us, 2.6x for stock llama.cpp — the one open engineering win
+
+**ADR 0015's decision stands; its mechanism does not.** "The GPU was never waiting" is true
+at batch 1 and false at batch 8. `llama-batched-bench` on llama.cpp b9620, same model, same
+shape:
+
+| sequences | T_pp | ms per pair | ours |
+| --- | --- | --- | --- |
+| 1 | 0.056 s | 56.0 | 60.3 |
+| 4 | 0.142 s | 35.5 | 65 |
+| 8 | **0.207 s** | **25.9** | **68** |
+| 16 | **0.321 s** | **20.1** | 65 |
+
+Stock llama.cpp coalesces eight recurrent sequences into one ubatch and gets 2.2x; sixteen
+gets 2.8x. Our path gets nothing, and is 2.6x off. The in-process table says the same from
+the other side: 256 tokens in one sequence costs 129 ms against 60 ms for 32 — the GPU will
+do four pairs' worth of tokens for twice one pair's price, because at M=32 it is idle and
+says so.
+
+**Cause not identified, and not guessed at.** `n_ubatch` ruled out (swept, flat), pooling
+type ruled out (swept, flat). `clear_kv_cache()` per group is the remaining suspect and
+**could not be A/B'd** — remove it and the next group's `decode` fails, because the design
+depends on it. Naming a suspect without the measurement is the mistake ADR 0017 exists to
+correct.
+
+This is **throughput, not latency**: it does not touch the 61 ms a single `predict` pays.
+It is worth up to 2.8x on `rerank`, which is the call that scores N options.
 
 ### The highest-leverage optimisation remaining
 
-**A smaller trunk.** The 0.8B measured 57 pairs/s against this 4B's 16.3 — a 3.5x speedup
-that is available today for whatever accuracy the 0.8B checkpoint actually has, and that is
-a product decision rather than an engineering one. Nothing in the engine would change: the
-registry already treats a model as configuration.
+**A smaller trunk — and the one this status used to name does not exist.**
 
-There is no second lever worth the name. The two obvious candidates were both measured and
-both are worth nothing: batching (flat), and quantisation (flat, and negative below Q8_0).
-`n_ctx` is memory, not speed. The ~50 ms fixed cost per forward is llama.cpp graph setup and
-is worth attacking only if the fixed term ever matters more than it does at 32 tokens.
+`AlexWortega/openjev` has exactly **three** checkpoints and **two** sizes: the 4B v1, the 4B
+v2 (ours), and a 35B MoE. The 0.8B and 2B *were trained* — `results/qwen0.8b_mnli_gpqa.json`
+and `results/qwen2b_full.json` are keyed on `ckpt/qwen3.5-0.8b-nli` and `ckpt/qwen3.5-2b-nli`,
+the author's local training paths, at MNLI-m 0.869 and 0.886 — **and neither was ever
+uploaded.** The "0.8B at 57 pairs/s, available today" line in the previous status described
+a checkpoint that cannot be downloaded, and is withdrawn. The 0.6B / 2B / 4B on openjev.com
+are stock general LLMs (`Qwen3-0.6B`, `MiniCPM5-2B`, `Qwen3.5-4B`) run in-browser for typed
+option-logits — not NLI heads.
 
-The honest summary: **openjev already runs at the speed a 4B prefills at on this machine.**
-Getting materially faster means asking the hardware to do less arithmetic, and the only
-lever with real leverage there is parameter count.
+**What does exist runs in our runtime today and answers in 10 ms** (ADR 0018). llama.cpp has
+**no DeBERTa support at all**, which rules out the whole mDeBERTa/DeBERTa-v3 family; it does
+convert `ModernBertForSequenceClassification` *with* its 3-label head. Both candidates
+converted and measured here — warm p50 over a running server, median of 100 calls:
+
+| | ModernCE-base-nli | nli-distilroberta-base | openjev 4B |
+| --- | --- | --- | --- |
+| params | 149.6M | 82.1M | 4.21B |
+| GGUF F16 | 301 MB | 167 MB | 8.4 GB |
+| **warm p50** | **10.4 ms** | **8.6 ms** | 61 ms |
+| **agreement vs the 4B, 35 pairs** | **32 / 35** | **29 / 35** | — |
+| llama.cpp vs its own HF result | 35/35, mean abs dp 0.0015 | 35/35, 0.0018 | — |
+
+**6x, for 3 pairs in 35.** Two of ModernCE's three disagreements are low-confidence or
+arguably the 4B's error; **one (pair 32) is confidently wrong and a confidence gate will not
+catch it.** Two silent traps are named in ADR 0018: ModernCE's `config.json` declares the
+wrong `id2label` (trusting it gives 2/35 instead of 32/35), and `llama-server`'s
+`/v1/rerank` returns only `logit[0]`.
+
+**Not built.** It is a second architecture, a second thing that breaks, and signing it off
+needs a fixture larger than 35 pairs. The numbers are in ADR 0018 so the call is the
+owner's.
 
 ## Weights and conversion
 
@@ -212,7 +294,9 @@ return, so there is no process left to report it. (ADR 0016)
 * **`usage.tokens` is always 0.** Core's `Session` still returns no token count.
 * **35 pairs is a small fixture.** It spans the label space and the awkward cases, but a
   real agreement claim — especially for the smaller quants — wants a few hundred pairs from
-  SNLI/ANLI dev. That is design risk R1's original experiment and it is still worth running.
+  SNLI/ANLI dev. That is design risk R1's original experiment, and ADR 0018 is what finally makes it
+  load-bearing: a fixture this small cannot sign off a second model that disagrees with the
+  4B on three of its pairs.
 * **R5 is closed on this machine only.** `otool -L` shows no `libllama`/`libggml` (only the
   system Metal frameworks), there is no `.metallib` beside the binary, and a copy of the
   binary run from an unrelated directory still does a real Metal forward pass. It has not
@@ -227,6 +311,9 @@ return, so there is no process left to report it. (ADR 0016)
 1. **Publish the artefacts.** Everything else is done; this is one upload and one sha256
    paste, and until it happens openjev only runs where the cache was filled by hand.
 2. **Q8_0 or Q4_K_M.** The accuracy cost is measured and the speed gain is in the table.
-3. **Is 16 pairs/s enough?** If not, the answer is the 0.8B trunk, not more engineering on
-   this one — and that is a question about how good the 0.8B has to be.
+3. **Is 16 pairs/s enough?** If not, the answer is a fast tier, not more engineering on
+   this trunk — ADR 0017 shows there is at most 18% left in it. The fast tier is
+   ModernCE-base-nli: **10.4 ms, 32/35 agreement, runs in the runtime we already ship**.
+   The question is whether 3 disagreements in 35 — one of them confidently wrong — is a
+   price worth 6x, and whether the fixture grows to a few hundred pairs before it is paid.
 4. **Does the short circuit ship on or off?** Unchanged from the last status.
