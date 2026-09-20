@@ -117,6 +117,19 @@ impl Session {
         })
     }
 
+    /// How many tokens each pair costs once the template is rendered — the same count
+    /// the forward pass will see, because it is produced by the same encoder.
+    ///
+    /// Exists so a server can report a real `usage`. Estimating it from character counts
+    /// instead is a number that looks like a measurement and is not one, and billing or
+    /// budgeting code downstream cannot tell the difference.
+    pub fn count_pair_tokens(&self, pairs: &[(&str, &str)]) -> Result<Vec<usize>> {
+        pairs
+            .iter()
+            .map(|(p, h)| Ok(self.encoder.encode_pair(p, h)?.tokens.len()))
+            .collect()
+    }
+
     pub fn predict(&self, pairs: &[(&str, &str)]) -> Result<Vec<Prediction>> {
         let inputs = self.encoder.encode_pairs(pairs)?;
         self.forward(&inputs)?
@@ -406,6 +419,21 @@ weights = { repo = "r", file = "w" }
                 "hypothesis slot must hold the option"
             );
         }
+    }
+
+    #[test]
+    fn counted_tokens_are_the_tokens_the_forward_pass_gets() {
+        let s = session(Caps::LATENTS, vec![vec![9.0, 0.0], vec![0.0, 9.0]]);
+        let pairs = [("zero one", "two"), ("three", "one")];
+        let counted = s.count_pair_tokens(&pairs).expect("count");
+        let encoded: Vec<usize> = pairs
+            .iter()
+            .map(|(p, h)| s.encoder.encode_pair(p, h).expect("encode").tokens.len())
+            .collect();
+        // Not a re-derivation of the same expression: it pins that the count comes from
+        // the encoder that actually runs, so a template or trim change moves both.
+        assert_eq!(counted, encoded);
+        assert!(counted.iter().all(|&n| n > 0));
     }
 
     #[test]

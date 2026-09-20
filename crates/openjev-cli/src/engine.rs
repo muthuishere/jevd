@@ -65,6 +65,9 @@ pub struct Outcome<T> {
     pub value: T,
     pub queue_ms: u64,
     pub compute_ms: u64,
+    /// Tokens this job's own inputs encoded to — its share of the coalesced batch, never
+    /// the batch's total. Zero only where the work is not pair work.
+    pub tokens: usize,
 }
 
 enum Work {
@@ -420,6 +423,9 @@ fn run_batch(session: &Session, batch: Vec<Job>) {
                         queue_ms: job.enqueued.elapsed().as_millis() as u64
                             - t.elapsed().as_millis() as u64,
                         compute_ms: t.elapsed().as_millis() as u64,
+                        // Latents do not go through the pair encoder, so there is no
+                        // honest count to report here rather than a guessed one.
+                        tokens: 0,
                     });
                 let _ = resp.send(out);
             }
@@ -430,6 +436,10 @@ fn run_batch(session: &Session, batch: Vec<Job>) {
     }
     let t = Instant::now();
     let refs: Vec<(&str, &str)> = flat.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    // A second tokenisation pass, deliberately. It is microseconds against a ~50 ms
+    // forward, and the alternative — threading a count out of `predict` — would put the
+    // number on a path where a backend could report one thing and the encoder another.
+    let token_counts = session.count_pair_tokens(&refs).unwrap_or_default();
     let result = session.predict(&refs);
     let compute_ms = t.elapsed().as_millis() as u64;
     metrics::histogram!("openjev_inference_duration_seconds").record(t.elapsed().as_secs_f64());
@@ -437,6 +447,9 @@ fn run_batch(session: &Session, batch: Vec<Job>) {
     match result {
         Ok(preds) => {
             for (range, resp, enqueued) in pair_jobs {
+                let tokens = token_counts
+                    .get(range.clone())
+                    .map_or(0, |t| t.iter().sum());
                 let slice = preds[range].to_vec();
                 let queue_ms = enqueued
                     .elapsed()
@@ -446,6 +459,7 @@ fn run_batch(session: &Session, batch: Vec<Job>) {
                     value: slice,
                     queue_ms,
                     compute_ms,
+                    tokens,
                 }));
             }
         }
