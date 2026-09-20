@@ -186,3 +186,54 @@ fn report_latency_and_throughput() {
     }
     eprintln!();
 }
+
+/// **Where the milliseconds go.** The throughput table above reports what a caller pays;
+/// this one decomposes it. A forward is `fixed + marginal * tokens`, and at NLI lengths
+/// the fixed term dominates — so knowing its size decides whether there is anything to
+/// optimise on our side of the FFI at all.
+///
+/// A 1-token forward is the floor: it still streams every weight in the model through the
+/// GPU exactly once, so it measures weight bandwidth plus per-call overhead and nothing
+/// else. Everything above it is arithmetic on a wider `M`.
+#[test]
+fn report_where_the_milliseconds_go() {
+    let Some((backend, label)) = open() else {
+        return;
+    };
+    eprintln!("\n=== fixed vs marginal: {label} ===");
+    eprintln!(
+        "{:>7} {:>10} {:>10} {:>14}",
+        "tokens", "p50 ms", "p95 ms", "ms/token"
+    );
+
+    let mut prev: Option<(usize, f64)> = None;
+    for tokens in [1usize, 2, 4, 8, 16, 32, 64, 128, 256] {
+        let inputs = vec![EncodedInput::unpadded(ids(7, tokens)).expect("input")];
+        for _ in 0..WARMUP {
+            backend.forward(&inputs).expect("warmup forward");
+        }
+        let iters = 30;
+        let mut samples = Vec::with_capacity(iters);
+        for _ in 0..iters {
+            let t = Instant::now();
+            backend.forward(&inputs).expect("forward");
+            samples.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        samples.sort_by(f64::total_cmp);
+        let p50 = percentile(&samples, 0.50);
+        // Marginal cost against the previous point, which is what "does another token
+        // cost anything" actually means. The average `p50/tokens` hides the fixed term.
+        let marginal = prev
+            .map(|(n, t)| (p50 - t) / (tokens - n) as f64)
+            .unwrap_or(f64::NAN);
+        eprintln!(
+            "{:>7} {:>10.1} {:>10.1} {:>14.3}",
+            tokens,
+            p50,
+            percentile(&samples, 0.95),
+            marginal
+        );
+        prev = Some((tokens, p50));
+    }
+    eprintln!();
+}
