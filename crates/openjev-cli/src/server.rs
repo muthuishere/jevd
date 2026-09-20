@@ -169,6 +169,8 @@ pub fn build_config(args: &crate::cli::ServeArgs, cfg: &mut Layered) -> CliResul
             max_pairs: cfg.usize("server.max_pairs"),
             max_options: cfg.usize("server.max_options"),
             max_field_chars: cfg.usize("server.max_field_chars"),
+            max_questions: cfg.usize("server.max_questions"),
+            max_criteria: cfg.usize("server.max_criteria"),
             max_queue: cfg.usize("server.max_queue"),
             max_batch: cfg.usize("server.max_batch"),
             request_timeout_secs: cfg.int("server.request_timeout_secs").max(0) as u64,
@@ -308,6 +310,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/predict", post(predict))
         .route("/v1/rerank", post(rerank))
         .route("/v1/grade", post(grade))
+        .route("/v1/systemone", post(systemone))
         .route("/v1/latents", post(latents))
         .route("/openapi.json", get(openapi))
         .layer(axum::middleware::from_fn_with_state(
@@ -510,6 +513,7 @@ async fn info(State(state): State<AppState>) -> Json<InfoResponse> {
         "predict".to_string(),
         "rerank".to_string(),
         "grade".to_string(),
+        "systemone".to_string(),
         "events".to_string(),
     ];
     if state.cfg.metrics {
@@ -722,22 +726,7 @@ async fn rerank(
     let out = with_deadline(&state, async { Ok(state.engine.predict(pairs).await?) }).await?;
     state.shared.requests_served.fetch_add(1, Ordering::Relaxed);
 
-    // `unwrap_or(0)` here would rank every option by P(contradiction) the moment the
-    // entailment label stopped matching — a confident, silent reversal of the ranking.
-    // Core refuses that at boot; so does this.
-    let ent = info
-        .labels
-        .iter()
-        .position(|l| *l == info.entailment_label)
-        .ok_or_else(|| {
-            ApiError::new(
-                Code::Internal,
-                format!(
-                    "entailment label '{}' is not among the model's labels {:?}",
-                    info.entailment_label, info.labels
-                ),
-            )
-        })?;
+    let ent = entailment_index(&info)?;
     let mut ranked: Vec<(usize, f32)> = out
         .value
         .iter()
@@ -806,6 +795,86 @@ async fn grade(
             queue_ms: out.queue_ms,
             compute_ms: out.compute_ms,
         },
+    }))
+}
+
+/// Where `P(entailment)` sits in a prediction's probability vector, **by name**.
+///
+/// `unwrap_or(0)` here would score everything by P(contradiction) the moment the label
+/// order changed — a confident, silent inversion of every answer. It has been wrong twice
+/// in this codebase, so there is now exactly one place that resolves it and both callers
+/// use it.
+fn entailment_index(info: &ModelInfo) -> Result<usize, ApiError> {
+    info.labels
+        .iter()
+        .position(|l| *l == info.entailment_label)
+        .ok_or_else(|| {
+            ApiError::new(
+                Code::Internal,
+                format!(
+                    "entailment label '{}' is not among the model's labels {:?}",
+                    info.entailment_label, info.labels
+                ),
+            )
+        })
+}
+
+/// `POST /v1/systemone` — the TypeSafe System One shape.
+///
+/// Every question in the request is evaluated against the one `state`, as **one** job on
+/// the one worker. Not N concurrent requests: the worker is single-threaded by ADR 0003,
+/// so fanning out would only spend N admission slots to arrive at the same serial
+/// execution, and would turn one request's deadline into N racing ones.
+async fn systemone(
+    State(state): State<AppState>,
+    ApiJson(req): ApiJson<crate::systemone::SystemOneRequest>,
+) -> Result<Json<crate::systemone::SystemOneResponse>, ApiError> {
+    use crate::systemone as s1;
+
+    let (premise, plan) =
+        s1::plan(&req, &state.cfg.limits).map_err(|e| ApiError::new(e.code, e.message))?;
+    if plan.hypotheses() > state.cfg.limits.max_pairs {
+        return Err(ApiError::new(
+            Code::PayloadTooLarge,
+            format!(
+                "these questions need {} forward passes, limit is {}",
+                plan.hypotheses(),
+                state.cfg.limits.max_pairs
+            ),
+        )
+        .with_detail(serde_json::json!({"limit_pairs": state.cfg.limits.max_pairs})));
+    }
+    let info = state.model_or_not_ready()?;
+    let ent = entailment_index(&info)?;
+
+    // The state is the premise for every pair, exactly once in the request and once per
+    // pair on the wire to the worker. Flattened in plan order, which is sorted key order.
+    let pairs: Vec<(String, String)> = plan
+        .items
+        .iter()
+        .flat_map(|i| i.hypotheses.iter().map(|h| (premise.clone(), h.clone())))
+        .collect();
+    let out = with_deadline(&state, async { Ok(state.engine.predict(pairs).await?) }).await?;
+    state.shared.requests_served.fetch_add(1, Ordering::Relaxed);
+
+    let entailment: Vec<f32> = out
+        .value
+        .iter()
+        .map(|p| p.probs.get(ent).copied().unwrap_or(0.0))
+        .collect();
+    Ok(Json(s1::SystemOneResponse {
+        // Echoed, because a client that asked for `jev-latest` and got `openjev` back
+        // cannot tell a compatible server from a misrouted one. What actually answered is
+        // on /v1/model and /v1/info.
+        model: req.model.clone().unwrap_or_else(|| info.model.clone()),
+        answers: s1::answers(&plan, &entailment),
+        usage: s1::SystemOneUsage {
+            input_tokens: out.tokens,
+            output_tokens: 0,
+            cost: 0.0,
+        },
+        id: s1::generation_id(),
+        provider: s1::PROVIDER.into(),
     }))
 }
 

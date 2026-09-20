@@ -16,4 +16,5 @@ pub mod openapi;
 pub mod runtime;
 pub mod server;
 pub mod state;
+pub mod systemone;
 pub mod util;

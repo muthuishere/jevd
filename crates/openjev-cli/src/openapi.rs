@@ -20,6 +20,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("/v1/predict", "post"),
     ("/v1/rerank", "post"),
     ("/v1/grade", "post"),
+    ("/v1/systemone", "post"),
     ("/v1/latents", "post"),
     ("/metrics", "get"),
     ("/openapi.json", "get"),
@@ -53,6 +54,7 @@ pub fn document(cfg: &ServerConfig) -> Value {
         "/v1/predict": { "post": op("pairs to label probabilities", Some("PredictRequest"), "PredictResponse") },
         "/v1/rerank": { "post": op("question plus options to a ranking", Some("RerankRequest"), "RerankResponse") },
         "/v1/grade": { "post": op("answer against reference", Some("GradeRequest"), "GradeResponse") },
+        "/v1/systemone": { "post": op("TypeSafe System One: one state, typed questions, typed answers", Some("SystemOneRequest"), "SystemOneResponse") },
         "/metrics": { "get": op("Prometheus text exposition", None, "Metrics") },
         "/openapi.json": { "get": op("this document", None, "OpenAPI") },
     });
@@ -114,6 +116,35 @@ fn schemas(cfg: &ServerConfig) -> Value {
             "object": {"type":"string"}, "label": {"type":"string"}, "scores": scores,
             "pass": {"type":"boolean"}, "threshold": {"type":"number"},
             "usage": {"$ref":"#/components/schemas/Usage"} } },
+        "Question": { "type": "object", "required": ["type"], "properties": {
+            "type": {"type":"string","enum":["noul","boolean","choice","score"]},
+            "instructions": {"description":"string, or any JSON object/array"},
+            "criteria": {"description": format!(
+                "noul/boolean: an object of true/false descriptions; choice: key -> description; \
+                 score: an ordered array of levels, lowest first. At most {} entries.",
+                cfg.limits.max_criteria)} } },
+        "SystemOneRequest": { "type": "object", "required": ["state","questions"], "properties": {
+            "model": {"type":"string"},
+            "state": {"description":"string, or any JSON object/array; the premise"},
+            "questions": {"type":"object","maxProperties": cfg.limits.max_questions,
+                          "additionalProperties": {"$ref":"#/components/schemas/Question"}} } },
+        "SystemOneResponse": { "type": "object", "required": ["model","answers","usage","id","provider"], "properties": {
+            "model": {"type":"string"},
+            "answers": {"type":"object","additionalProperties": {"type":"object","properties": {
+                "type": {"type":"string","enum":["noul","boolean","choice","score"]},
+                "noul": {"type":"number","minimum":0,"maximum":1},
+                "probability": {"type":"number","minimum":0,"maximum":1},
+                "choice": {"type":"string"},
+                "score": {"type":"number"},
+                "legend": {"type":"object","additionalProperties":{"type":"string"}},
+                "probabilities": {"type":"object","additionalProperties":{"type":"number"}},
+                "confidence": {"type":"number","minimum":0,"maximum":1} }}},
+            "usage": {"type":"object","properties": {
+                "input_tokens": {"type":"integer"},
+                "output_tokens": {"type":"integer","const":0,"description":"a cross-encoder emits no tokens"},
+                "cost": {"type":"number","const":0,"description":"local inference is free"} }},
+            "id": {"type":"string","pattern":"^gen-dec-[0-9]+-[A-Za-z0-9]{20}$"},
+            "provider": {"type":"string","const":"openjev","description":"openjev, never TypeSafe — see docs/adr/0017"} } },
         "LatentsRequest": { "type": "object", "required": ["texts"], "properties": {
             "texts": {"type":"array","items":{"type":"string"}} } },
         "LatentsResponse": { "type": "object", "properties": {
@@ -137,7 +168,9 @@ fn schemas(cfg: &ServerConfig) -> Value {
             "type": "object", "required": ["code","message"], "properties": {
                 "code": {"type":"string","enum":[
                     "invalid_request","unsupported_media_type","unauthorized","not_found",
-                    "unprocessable","payload_too_large","queue_full","timeout","canceled",
+                    "unprocessable","invalid_question","unknown_question_type","empty_criteria",
+                    "too_many_questions","state_too_long",
+                    "payload_too_large","queue_full","timeout","canceled",
                     "model_not_ready","device_error","shutting_down","internal"]},
                 "message": {"type":"string"}, "detail": {"type":"object"}, "request_id": {"type":"string"} } } } }
     })
@@ -176,6 +209,10 @@ mod tests {
             doc["components"]["schemas"]["PredictRequest"]["properties"]["pairs"]["maxItems"],
             c.limits.max_pairs
         );
+        assert_eq!(
+            doc["components"]["schemas"]["SystemOneRequest"]["properties"]["questions"]["maxProperties"],
+            c.limits.max_questions
+        );
     }
 
     #[test]
@@ -186,6 +223,11 @@ mod tests {
             .clone();
         let listed: Vec<String> = serde_json::from_value(listed).unwrap();
         for c in [
+            crate::api::Code::InvalidQuestion,
+            crate::api::Code::UnknownQuestionType,
+            crate::api::Code::EmptyCriteria,
+            crate::api::Code::TooManyQuestions,
+            crate::api::Code::StateTooLong,
             crate::api::Code::InvalidRequest,
             crate::api::Code::Unauthorized,
             crate::api::Code::QueueFull,

@@ -138,6 +138,9 @@ pub struct Limits {
     pub max_pairs: usize,
     pub max_options: usize,
     pub max_field_chars: usize,
+    /// `/v1/systemone`: questions per request, and criteria per question.
+    pub max_questions: usize,
+    pub max_criteria: usize,
     pub max_queue: usize,
     pub max_batch: usize,
     pub request_timeout_secs: u64,
@@ -223,6 +226,15 @@ pub enum Code {
     Unauthorized,
     NotFound,
     Unprocessable,
+    /// `/v1/systemone`: a question the server understood the shape of and
+    /// still cannot answer. Separate codes because "you sent a type I do not know" and
+    /// "you sent a choice with one option" call for different fixes in the client, and a
+    /// single `unprocessable` makes the caller parse `message` to tell them apart.
+    InvalidQuestion,
+    UnknownQuestionType,
+    EmptyCriteria,
+    TooManyQuestions,
+    StateTooLong,
     PayloadTooLarge,
     QueueFull,
     Timeout,
@@ -241,6 +253,11 @@ impl Code {
             Code::Unauthorized => "unauthorized",
             Code::NotFound => "not_found",
             Code::Unprocessable => "unprocessable",
+            Code::InvalidQuestion => "invalid_question",
+            Code::UnknownQuestionType => "unknown_question_type",
+            Code::EmptyCriteria => "empty_criteria",
+            Code::TooManyQuestions => "too_many_questions",
+            Code::StateTooLong => "state_too_long",
             Code::PayloadTooLarge => "payload_too_large",
             Code::QueueFull => "queue_full",
             Code::Timeout => "timeout",
@@ -258,7 +275,11 @@ impl Code {
             Code::UnsupportedMediaType => 415,
             Code::Unauthorized => 401,
             Code::NotFound => 404,
-            Code::Unprocessable => 422,
+            Code::Unprocessable
+            | Code::InvalidQuestion
+            | Code::UnknownQuestionType
+            | Code::EmptyCriteria => 422,
+            Code::TooManyQuestions | Code::StateTooLong => 413,
             Code::PayloadTooLarge => 413,
             Code::QueueFull => 429,
             Code::Timeout => 504,
@@ -328,6 +349,11 @@ mod tests {
             (Code::Unauthorized, 401),
             (Code::NotFound, 404),
             (Code::Unprocessable, 422),
+            (Code::InvalidQuestion, 422),
+            (Code::UnknownQuestionType, 422),
+            (Code::EmptyCriteria, 422),
+            (Code::TooManyQuestions, 413),
+            (Code::StateTooLong, 413),
             (Code::PayloadTooLarge, 413),
             (Code::QueueFull, 429),
             (Code::Timeout, 504),

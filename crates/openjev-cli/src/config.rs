@@ -82,6 +82,12 @@ pub fn defaults() -> BTreeMap<String, toml::Value> {
     set("server.max_pairs", V::Integer(256));
     set("server.max_options", V::Integer(512));
     set("server.max_field_chars", V::Integer(32_768));
+    // /v1/systemone. 255 criteria is TypeSafe's own documented cap on a choice, so a
+    // request they accept is a request we accept. The question cap is ours: there is no
+    // documented one upstream, and an unbounded question map is an unbounded number of
+    // forward passes behind a single admission slot.
+    set("server.max_questions", V::Integer(32));
+    set("server.max_criteria", V::Integer(255));
     set("server.request_timeout_secs", V::Integer(60));
     set("server.shutdown_grace_secs", V::Integer(20));
     set("server.cors_origins", V::Array(vec![]));
