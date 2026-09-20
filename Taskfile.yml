@@ -67,14 +67,34 @@ tasks:
       - cargo test --release -p openjev-core --features real-weights,backend-llamacpp
         --test golden -- --nocapture --test-threads=1
 
+  systemone:
+    desc: The owner's System One example against a RUNNING server with real weights
+    # The weightless half of this contract runs in `check` (tests/systemone_e2e.rs, a real
+    # Session over a stub backend). This is the other half: the same request, the real
+    # checkpoint. Silently green without OPENJEV_SERVER_URL, so CI that means to enforce
+    # it has to set the variable — absence of the fixture is absence of evidence.
+    env:
+      OPENJEV_SERVER_URL: '{{.OPENJEV_SERVER_URL | default "http://127.0.0.1:21131"}}'
+    cmds:
+      - cargo test -p openjev-cli --test systemone_live -- --nocapture
+
   bench:
     desc: Latency and throughput on real weights. Reports, never asserts
     env:
       OPENJEV_TEST_GGUF: '{{.OPENJEV_ARTEFACTS}}/openjev-4b-nli-v2-{{.Q | default "Q8_0"}}.gguf'
       OPENJEV_TEST_DTYPE: '{{.Q | default "Q8_0" | lower}}'
     cmds:
+      # --test-threads=1 is load-bearing, not tidiness: two benchmarks sharing one GPU
+      # measure each other's contention and report numbers ~30% high, with p95 blowing
+      # out to 3x p50. A benchmark that races itself is worse than no benchmark.
       - cargo test --release -p openjev-core --features real-weights,backend-llamacpp
-        --test bench -- --nocapture
+        --test bench -- --nocapture --test-threads=1
+
+  bench:hw:
+    desc: What this GPU can actually do — fp16 matmul TFLOP/s and bandwidth. macOS only
+    cmds:
+      - swiftc -O scripts/metal-peak.swift -o /tmp/openjev-metal-peak
+      - /tmp/openjev-metal-peak
 
   # --- dev ------------------------------------------------------------------
   serve:

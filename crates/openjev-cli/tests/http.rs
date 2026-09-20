@@ -439,3 +439,160 @@ async fn metrics_are_open_on_loopback_and_absent_when_switched_off() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["code"], "not_found");
 }
+
+// ---------------------------------------------------------------- /v1/systemone
+//
+// Every rejection below is reached before the worker, so it is observable with no
+// weights — which is the point: a client integrating against this server can see the
+// whole error contract on a laptop.
+
+/// The owner's exact example, as a value, so the request under test and the one in the
+/// README cannot drift apart silently.
+fn owners_example() -> Value {
+    serde_json::json!({
+        "model": "openjev",
+        "state": "My card was charged twice. Please help ASAP.",
+        "questions": {
+            "urgent": {
+                "type": "noul",
+                "instructions": "Does this message convey urgency?",
+                "criteria": { "true": "Explicitly time-sensitive", "false": "No urgency expressed" }
+            },
+            "team": {
+                "type": "choice",
+                "instructions": "Which team should handle this?",
+                "criteria": {
+                    "billing": "Payments and refunds",
+                    "technical": "Bugs and integrations",
+                    "sales": "Pricing and new accounts"
+                }
+            }
+        }
+    })
+}
+
+#[tokio::test]
+async fn systemone_is_routed_and_reaches_the_worker_on_a_valid_request() {
+    let (app, _) = app_with(config(&["openjev", "serve"]), Phase::Ready, true);
+    let (status, body, _) = send(&app, post("/v1/systemone", owners_example())).await;
+    // The model in this harness never loads, so the honest end of the road is the
+    // deadline — not a 404 and not a validation error. Anything else means the owner's
+    // example does not even get as far as the engine.
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{body}");
+    assert_eq!(body["error"]["code"], "timeout");
+}
+
+#[tokio::test]
+async fn systemone_is_refused_before_the_model_is_resident() {
+    let (app, _) = app_with(config(&["openjev", "serve"]), Phase::Loading, false);
+    let (status, body, headers) = send(&app, post("/v1/systemone", owners_example())).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "model_not_ready");
+    assert_eq!(headers["retry-after"], "5");
+}
+
+#[tokio::test]
+async fn systemone_needs_the_same_bearer_token_as_every_other_protected_route() {
+    let cfg = config(&["openjev", "serve", "--token", "s3cret"]);
+    let (app, _) = app_with(cfg, Phase::Ready, true);
+    let (status, body, _) = send(&app, post("/v1/systemone", owners_example())).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"]["code"], "unauthorized");
+
+    // And the right token gets through to the same deadline as the unauthenticated
+    // loopback case: one auth path, not a second one bolted onto the new endpoint.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/systemone")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer s3cret")
+        .body(Body::from(owners_example().to_string()))
+        .expect("request");
+    let (status, _, _) = send(&app, req).await;
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+}
+
+#[tokio::test]
+async fn a_malformed_question_is_a_clean_4xx_with_its_own_code() {
+    let (app, _) = app_with(config(&["openjev", "serve"]), Phase::Ready, true);
+    let cases: &[(Value, StatusCode, &str)] = &[
+        (
+            serde_json::json!({"state":"s","questions":{"q":{"type":"vibes","instructions":"?"}}}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unknown_question_type",
+        ),
+        (
+            // One option is not a choice: answering it would be confident and meaningless.
+            serde_json::json!({"state":"s","questions":{"q":{"type":"choice","criteria":{"only":"just the one"}}}}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_question",
+        ),
+        (
+            serde_json::json!({"state":"s","questions":{"q":{"type":"choice","criteria":{"a":"","b":""}}}}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "empty_criteria",
+        ),
+        (
+            serde_json::json!({"state":"s","questions":{"q":{"type":"choice"}}}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "empty_criteria",
+        ),
+        (
+            serde_json::json!({"state":"","questions":{"q":{"type":"noul","instructions":"?"}}}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unprocessable",
+        ),
+        (
+            serde_json::json!({"state":"s","questions":{}}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unprocessable",
+        ),
+        (
+            serde_json::json!({"state":"x".repeat(32_769),"questions":{"q":{"type":"noul","instructions":"?"}}}),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "state_too_long",
+        ),
+    ];
+    for (body, status, code) in cases {
+        let (got, answer, _) = send(&app, post("/v1/systemone", body.clone())).await;
+        assert_eq!(got, *status, "{code}: {answer}");
+        assert_eq!(answer["error"]["code"], *code, "{answer}");
+        // The one envelope, on the new endpoint too.
+        assert!(answer["error"]["message"].is_string());
+        assert!(answer["error"]["request_id"].is_string());
+    }
+}
+
+#[tokio::test]
+async fn too_many_questions_is_refused_by_count_before_anything_is_encoded() {
+    let (app, _) = app_with(config(&["openjev", "serve"]), Phase::Ready, true);
+    let mut questions = serde_json::Map::new();
+    for i in 0..33 {
+        questions.insert(
+            format!("q{i}"),
+            serde_json::json!({"type":"noul","instructions":"?"}),
+        );
+    }
+    let (status, body, _) = send(
+        &app,
+        post(
+            "/v1/systemone",
+            serde_json::json!({"state":"s","questions":questions}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(body["error"]["code"], "too_many_questions");
+}
+
+#[tokio::test]
+async fn info_advertises_systemone_and_its_limits() {
+    let (app, _) = app_with(config(&["openjev", "serve"]), Phase::Ready, true);
+    let (_, body, _) = send(&app, get("/v1/info")).await;
+    let caps: Vec<String> = serde_json::from_value(body["capabilities"].clone()).expect("caps");
+    // Feature detection, not version arithmetic: a client asks whether this server has
+    // the endpoint before it posts to it.
+    assert!(caps.contains(&"systemone".to_string()), "{caps:?}");
+    assert_eq!(body["limits"]["max_questions"], 32);
+    assert_eq!(body["limits"]["max_criteria"], 255);
+}

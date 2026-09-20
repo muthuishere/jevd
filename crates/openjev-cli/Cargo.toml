@@ -39,6 +39,10 @@ ureq = { version = "3", default-features = false, features = ["rustls", "json"] 
 
 [dev-dependencies]
 tempfile = "3"
+# For the stub-backend end-to-end test: it builds a real `Session` (encoder + head +
+# backend) so the owner's example runs through the whole server, not past a mock of it.
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+safetensors = "0.8"
 tower = { version = "0.5", features = ["util"] }
 
 [features]

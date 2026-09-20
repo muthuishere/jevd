@@ -26,6 +26,29 @@ and `POST /v1/predict|rerank|grade` on a running `openjev serve` all return the 
 numbers. `rerank` puts *carbon dioxide* first for the photosynthesis question; `grade`
 scores a faithful answer 0.976 entailment and a wrong one 0.982 contradiction.
 
+### System One, served (2026-09-20)
+
+`POST /v1/systemone` serves the TypeSafe System One shape alongside
+`/v1/predict|rerank|grade`, which are unchanged. Four question types — `noul`, `choice`,
+`score`, and `boolean` (the Vercel AI Gateway's name for a `noul`). Clients written for
+TypeSafe's API point at it by changing a base URL.
+
+The owner's example runs end to end in `task check`: `tests/systemone_e2e.rs` builds a
+real `Session` — real registry entry, template, tokenizer and linear head — over a stub
+backend with chosen hidden states, and asserts the exact response shape through the real
+router, worker and answer arithmetic. `tests/systemone_live.rs` (`task systemone`) runs the
+identical request against a running server with real weights; **it has not been run** —
+there is no converted checkpoint on this machine — so the wire shape is proven and the
+checkpoint's judgement on that example is not.
+
+Three deliberate divergences, all documented in `docs/adr/0017`: `provider` reports
+`openjev` and never `TypeSafe`; errors use this server's one envelope rather than
+TypeSafe's; `usage.output_tokens` and `cost` are honest zeros.
+
+**`usage.tokens` is no longer always 0.** The gap this file used to list is closed:
+`Session::count_pair_tokens` counts with the encoder that ran, and every pair endpoint
+reports a real number (ADR 0019). `/v1/latents` still reports 0 and says why.
+
 The contract lives at `tests/golden/nli.json` and is enforced by
 `task golden OPENJEV_ARTEFACTS=<dir> OPENJEV_TOKENIZER=<path>`.
 
