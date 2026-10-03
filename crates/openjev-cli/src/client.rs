@@ -6,6 +6,7 @@
 
 use crate::api::*;
 use crate::exit::{CliError, CliResult};
+use crate::util;
 use std::path::Path;
 use std::time::Duration;
 
@@ -84,9 +85,7 @@ impl Client {
             base: base.into().trim_end_matches('/').to_string(),
             // A client that cannot be told a token cannot talk to a secured server, and
             // a flag would put it in `ps`.
-            token: std::env::var("OPENJEV_TOKEN")
-                .ok()
-                .filter(|t| !t.is_empty()),
+            token: util::env_token(),
             agent,
         }
     }

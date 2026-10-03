@@ -1,4 +1,6 @@
-# 0017 — the 61 ms is bandwidth plus a small-M matmul, and both of those are the hardware
+# 0020 — the 61 ms is bandwidth plus a small-M matmul, and both of those are the hardware
+
+*Numbered 0017 until 2026-10-03, when it shared that number with another ADR; anything citing "ADR 0017" about latency means this one.*
 
 Status: **accepted**, measured 2026-09-20. **Confirms ADR 0015's conclusion and falsifies
 its arithmetic — and one of the things it falsifies is worth 2.6x.**
@@ -151,7 +153,7 @@ Against 61 ms today, that is an 18% prize for work that would have to be done in
 ggml-metal. It is not worth taking, and it is not remotely the target.
 
 **Say the number plainly: 61 ms is the floor for 4B on this hardware, to within 20%.
-Milliseconds require a smaller model.** See ADR 0018.
+Milliseconds require a smaller model.** See ADR 0021.
 
 Two things were fixed, both in the measurement apparatus rather than the engine:
 

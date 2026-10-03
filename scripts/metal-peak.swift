@@ -1,6 +1,6 @@
 // What this GPU can actually do, measured — not a spec sheet.
 //
-// Exists because docs/adr/0017 needed a denominator. "We sustain 4.8 TFLOP/s" says
+// Exists because docs/adr/0020 needed a denominator. "We sustain 4.8 TFLOP/s" says
 // nothing until you know whether the ceiling is 5 or 50, and the shape that matters is
 // not the big square matmul every vendor quotes: it is M=32, the number of tokens in an
 // NLI pair. Apple's own MPS kernels at that shape are the fairest upper bound on what

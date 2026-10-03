@@ -32,7 +32,7 @@ URL**, with no code change and nothing leaving the machine.
 
 ```sh
 curl -s http://127.0.0.1:21131/v1/systemone \
-  -H "Authorization: Bearer $OPENJEV_API_KEY" \
+  -H "Authorization: Bearer $OPENJEV_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "openjev",
@@ -74,8 +74,10 @@ curl -s http://127.0.0.1:21131/v1/systemone \
 }
 ```
 
-On loopback with no token configured, the `Authorization` header is optional and a bearer
-is accepted if you send one — the same auth as every other route, not a second path.
+The token is `OPENJEV_TOKEN`: `openjev serve` requires it as a bearer when set (or
+`--token` / `--token-file`), and the `openjev` client sends it. On loopback with no token
+configured, the `Authorization` header is optional and a bearer is accepted if you send
+one — the same auth as every other route, not a second path.
 
 | type | ask with | answered with |
 | --- | --- | --- |

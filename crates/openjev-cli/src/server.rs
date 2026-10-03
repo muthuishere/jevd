@@ -67,6 +67,16 @@ pub struct ServerConfig {
 
 /// Flags over env over file over defaults, then the rules that can refuse a startup.
 pub fn build_config(args: &crate::cli::ServeArgs, cfg: &mut Layered) -> CliResult<ServerConfig> {
+    build_config_with(args, cfg, util::env_token)
+}
+
+/// [`build_config`] with the token environment injected, so tests do not depend on what the
+/// developer's shell exports.
+pub fn build_config_with(
+    args: &crate::cli::ServeArgs,
+    cfg: &mut Layered,
+    env_token: impl FnOnce() -> Option<String>,
+) -> CliResult<ServerConfig> {
     use toml::Value as V;
     cfg.set_flag("server.host", args.host.clone().map(V::String));
     cfg.set_flag("server.port", args.port.map(|p| V::Integer(p as i64)));
@@ -123,7 +133,14 @@ pub fn build_config(args: &crate::cli::ServeArgs, cfg: &mut Layered) -> CliResul
         ))
     })?;
 
-    let token = match (&args.token, cfg.opt_string("auth.token_file")) {
+    // clap reads OPENJEV_TOKEN into --token; its alias OPENJEV_API_KEY counts only where
+    // OPENJEV_TOKEN could have (no --token-file, no --no-auth), and OPENJEV_TOKEN wins.
+    let flag_token = args.token.clone().or_else(|| {
+        (args.token_file.is_none() && !args.no_auth)
+            .then(env_token)
+            .flatten()
+    });
+    let token = match (&flag_token, cfg.opt_string("auth.token_file")) {
         (Some(t), _) => Some(t.clone()),
         (None, Some(f)) => Some(read_token_file(&PathBuf::from(f))?),
         (None, None) => cfg.opt_string("auth.token"),
@@ -1302,6 +1319,43 @@ mod tests {
 
     fn empty_config() -> Layered {
         Layered::load(None, &std::collections::BTreeMap::new()).expect("defaults")
+    }
+
+    /// Every test below sees no token in the environment, whatever the shell exports.
+    fn build_config(args: &crate::cli::ServeArgs, cfg: &mut Layered) -> CliResult<ServerConfig> {
+        build_config_with(args, cfg, || None)
+    }
+
+    #[test]
+    fn openjev_api_key_in_the_environment_is_the_token() {
+        let args = serve_args(&["openjev", "serve", "--host", "0.0.0.0"]);
+        let cfg =
+            build_config_with(&args, &mut empty_config(), || Some("from-env".into())).unwrap();
+        match &cfg.auth {
+            Auth::Bearer { hash } => assert!(util::token_matches("from-env", hash)),
+            _ => panic!("expected bearer"),
+        }
+    }
+
+    #[test]
+    fn a_token_file_beats_the_environment_token() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("tok");
+        std::fs::write(&f, "filetoken\n").unwrap();
+        let args = serve_args(&[
+            "openjev",
+            "serve",
+            "--host",
+            "0.0.0.0",
+            "--token-file",
+            f.to_str().unwrap(),
+        ]);
+        let cfg =
+            build_config_with(&args, &mut empty_config(), || Some("from-env".into())).unwrap();
+        match &cfg.auth {
+            Auth::Bearer { hash } => assert!(util::token_matches("filetoken", hash)),
+            _ => panic!("expected bearer"),
+        }
     }
 
     #[test]

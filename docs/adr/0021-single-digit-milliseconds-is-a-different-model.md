@@ -1,11 +1,13 @@
-# 0018 — single-digit milliseconds is a different model, and one exists that llama.cpp already runs
+# 0021 — single-digit milliseconds is a different model, and one exists that llama.cpp already runs
+
+*Numbered 0018 until 2026-10-03, when it shared that number with another ADR; anything citing "ADR 0018" about latency means this one.*
 
 Status: **proposed** — measured 2026-09-20, **not built**. The numbers are here so the
 decision is the owner's and not an engineer's preference wearing a table.
 
 ## The failure this is organised against
 
-Answering a latency target with more engineering on the model you already have. ADR 0017
+Answering a latency target with more engineering on the model you already have. ADR 0020
 spent a day proving there is at most 18% in the 4B path. The target is 6x. Every hour after
 that measurement spent on kernels would have been an hour spent on the wrong question.
 

@@ -12,7 +12,7 @@ use openjev_cli::cli::{Cli, Command};
 use openjev_cli::config::Layered;
 use openjev_cli::engine::{Engine, Shared};
 use openjev_cli::openapi::ROUTES;
-use openjev_cli::server::{AppState, ServerConfig, build_config, router};
+use openjev_cli::server::{AppState, ServerConfig, build_config_with, router};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -24,7 +24,7 @@ fn config(args: &[&str]) -> ServerConfig {
         panic!("not serve")
     };
     let mut layered = Layered::load(None, &BTreeMap::new()).expect("defaults");
-    build_config(&s, &mut layered).expect("config")
+    build_config_with(&s, &mut layered, || None).expect("config")
 }
 
 /// A server whose model never loads: the phase stays where we put it, so every

@@ -234,14 +234,21 @@ impl Engine {
                 p => JobError::NotReady(p.as_str().to_string()),
             });
         }
+        // Counted before the send: once the job is in the channel the worker may take it and
+        // subtract first, which wrapped the depth below zero (and overflowed in debug builds).
+        let d = self.shared.queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
         match self.tx.try_send(job) {
             Ok(()) => {
-                let d = self.shared.queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
                 metrics::gauge!("openjev_queue_depth").set(d as f64);
                 Ok(())
             }
-            Err(mpsc::error::TrySendError::Full(_)) => Err(JobError::QueueFull),
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(JobError::ShuttingDown),
+            Err(e) => {
+                self.shared.queue_depth.fetch_sub(1, Ordering::Relaxed);
+                Err(match e {
+                    mpsc::error::TrySendError::Full(_) => JobError::QueueFull,
+                    mpsc::error::TrySendError::Closed(_) => JobError::ShuttingDown,
+                })
+            }
         }
     }
 }

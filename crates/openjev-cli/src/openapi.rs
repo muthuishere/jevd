@@ -187,7 +187,7 @@ mod tests {
         };
         let mut layered =
             crate::config::Layered::load(None, &std::collections::BTreeMap::new()).unwrap();
-        crate::server::build_config(&s, &mut layered).unwrap()
+        crate::server::build_config_with(&s, &mut layered, || None).unwrap()
     }
 
     #[test]

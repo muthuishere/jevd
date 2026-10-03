@@ -117,16 +117,22 @@ fn to_f32(dtype: safetensors::Dtype, data: &[u8], want: usize) -> Result<Vec<f32
     use safetensors::Dtype as D;
     let v: Vec<f32> = match dtype {
         D::F32 => data
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect(),
         D::F16 => data
-            .chunks_exact(2)
-            .map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32())
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| half::f16::from_le_bytes(*c).to_f32())
             .collect(),
         D::BF16 => data
-            .chunks_exact(2)
-            .map(|c| half::bf16::from_le_bytes([c[0], c[1]]).to_f32())
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| half::bf16::from_le_bytes(*c).to_f32())
             .collect(),
         other => {
             return Err(JevError::Head(format!(

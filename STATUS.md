@@ -84,7 +84,7 @@ Q8_0, Metal, M5 Pro, warm, one worker, `tests/bench.rs`:
 
 Inside the 8–18 pairs/s band the earlier estimate predicted for a 4B. The
 "50 ms fixed + 0.45 ms/token" model fitted to three points is wrong in the middle: the real
-curve is 20 ms at one token, a step between 8 and 12, then flat to 48. See ADR 0017.
+curve is 20 ms at one token, a step between 8 and 12, then flat to 48. See ADR 0020.
 
 CPU (same Q8_0, all cores): **2.3 pairs/s** at 32 tokens, 0.3 at 512 — 7x and 13x slower
 than Metal. CPU is a fallback, not a deployment target. CUDA and Vulkan remain unexercised.
@@ -103,7 +103,7 @@ because dequantisation is work too. **Q8_0 dominates: most accurate of the quant
 options and the fastest.** The usual accuracy-for-speed trade is simply not on offer on
 this architecture, which is the same fact ADR 0015 reaches from the batching side.
 
-### Where the 61 ms goes — profiled, not guessed (ADR 0017)
+### Where the 61 ms goes — profiled, not guessed (ADR 0020)
 
 The denominator got measured first, because ADR 0015 asserted "we are at this GPU's rate"
 against a number nobody had taken. `task bench:hw` (`scripts/metal-peak.swift`, MPS on real
@@ -181,7 +181,7 @@ says so.
 **Cause not identified, and not guessed at.** `n_ubatch` ruled out (swept, flat), pooling
 type ruled out (swept, flat). `clear_kv_cache()` per group is the remaining suspect and
 **could not be A/B'd** — remove it and the next group's `decode` fails, because the design
-depends on it. Naming a suspect without the measurement is the mistake ADR 0017 exists to
+depends on it. Naming a suspect without the measurement is the mistake ADR 0020 exists to
 correct.
 
 This is **throughput, not latency**: it does not touch the 61 ms a single `predict` pays.
@@ -200,7 +200,7 @@ a checkpoint that cannot be downloaded, and is withdrawn. The 0.6B / 2B / 4B on 
 are stock general LLMs (`Qwen3-0.6B`, `MiniCPM5-2B`, `Qwen3.5-4B`) run in-browser for typed
 option-logits — not NLI heads.
 
-**What does exist runs in our runtime today and answers in 10 ms** (ADR 0018). llama.cpp has
+**What does exist runs in our runtime today and answers in 10 ms** (ADR 0021). llama.cpp has
 **no DeBERTa support at all**, which rules out the whole mDeBERTa/DeBERTa-v3 family; it does
 convert `ModernBertForSequenceClassification` *with* its 3-label head. Both candidates
 converted and measured here — warm p50 over a running server, median of 100 calls:
@@ -215,12 +215,12 @@ converted and measured here — warm p50 over a running server, median of 100 ca
 
 **6x, for 3 pairs in 35.** Two of ModernCE's three disagreements are low-confidence or
 arguably the 4B's error; **one (pair 32) is confidently wrong and a confidence gate will not
-catch it.** Two silent traps are named in ADR 0018: ModernCE's `config.json` declares the
+catch it.** Two silent traps are named in ADR 0021: ModernCE's `config.json` declares the
 wrong `id2label` (trusting it gives 2/35 instead of 32/35), and `llama-server`'s
 `/v1/rerank` returns only `logit[0]`.
 
 **Not built.** It is a second architecture, a second thing that breaks, and signing it off
-needs a fixture larger than 35 pairs. The numbers are in ADR 0018 so the call is the
+needs a fixture larger than 35 pairs. The numbers are in ADR 0021 so the call is the
 owner's.
 
 ## Weights and conversion
@@ -294,7 +294,7 @@ return, so there is no process left to report it. (ADR 0016)
 * **`usage.tokens` is always 0.** Core's `Session` still returns no token count.
 * **35 pairs is a small fixture.** It spans the label space and the awkward cases, but a
   real agreement claim — especially for the smaller quants — wants a few hundred pairs from
-  SNLI/ANLI dev. That is design risk R1's original experiment, and ADR 0018 is what finally makes it
+  SNLI/ANLI dev. That is design risk R1's original experiment, and ADR 0021 is what finally makes it
   load-bearing: a fixture this small cannot sign off a second model that disagrees with the
   4B on three of its pairs.
 * **R5 is closed on this machine only.** `otool -L` shows no `libllama`/`libggml` (only the
@@ -312,7 +312,7 @@ return, so there is no process left to report it. (ADR 0016)
    paste, and until it happens openjev only runs where the cache was filled by hand.
 2. **Q8_0 or Q4_K_M.** The accuracy cost is measured and the speed gain is in the table.
 3. **Is 16 pairs/s enough?** If not, the answer is a fast tier, not more engineering on
-   this trunk — ADR 0017 shows there is at most 18% left in it. The fast tier is
+   this trunk — ADR 0020 shows there is at most 18% left in it. The fast tier is
    ModernCE-base-nli: **10.4 ms, 32/35 agreement, runs in the runtime we already ship**.
    The question is whether 3 disagreements in 35 — one of them confidently wrong — is a
    price worth 6x, and whether the fixture grows to a few hundred pairs before it is paid.
