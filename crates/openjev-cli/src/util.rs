@@ -108,6 +108,20 @@ pub fn human_secs(s: f64) -> String {
     }
 }
 
+/// The bearer token from the environment: `OPENJEV_TOKEN`, else `OPENJEV_API_KEY` (an alias,
+/// because that is the name System One clients already export). `OPENJEV_TOKEN` wins when both
+/// are set; an empty value counts as unset.
+pub fn env_token() -> Option<String> {
+    env_token_from(|k| std::env::var(k).ok())
+}
+
+/// [`env_token`] over any lookup, so the precedence is testable without mutating the process env.
+pub fn env_token_from(get: impl Fn(&str) -> Option<String>) -> Option<String> {
+    ["OPENJEV_TOKEN", "OPENJEV_API_KEY"]
+        .into_iter()
+        .find_map(|k| get(k).filter(|v| !v.is_empty()))
+}
+
 /// An address only this machine can reach. The whole auth default hangs off this
 /// predicate, so it is a function with tests, not an inline `starts_with("127.")`.
 pub fn is_loopback(host: &str) -> bool {
@@ -125,6 +139,32 @@ mod tests {
     fn epoch_and_a_known_date_format_exactly() {
         assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339(1_758_268_442), "2025-09-19T07:54:02Z");
+    }
+
+    #[test]
+    fn openjev_token_wins_and_openjev_api_key_is_its_alias() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(name, _)| *name == k)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        assert_eq!(
+            env_token_from(env(&[("OPENJEV_TOKEN", "t"), ("OPENJEV_API_KEY", "k")])),
+            Some("t".into())
+        );
+        assert_eq!(
+            env_token_from(env(&[("OPENJEV_API_KEY", "k")])),
+            Some("k".into())
+        );
+        assert_eq!(
+            env_token_from(env(&[("OPENJEV_TOKEN", ""), ("OPENJEV_API_KEY", "k")])),
+            Some("k".into()),
+            "an empty OPENJEV_TOKEN does not hide the alias"
+        );
+        assert_eq!(env_token_from(env(&[])), None);
     }
 
     #[test]

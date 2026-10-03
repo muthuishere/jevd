@@ -22,7 +22,7 @@ use openjev_cli::api::Phase;
 use openjev_cli::cli::{Cli, Command};
 use openjev_cli::config::Layered;
 use openjev_cli::engine::{Engine, Shared};
-use openjev_cli::server::{AppState, ServerConfig, build_config, router};
+use openjev_cli::server::{AppState, ServerConfig, build_config_with, router};
 use openjev_core::backend::{Backend, BackendInfo, Caps, EncodedInput, Hidden};
 use openjev_core::device::{Device, Dtype};
 use openjev_core::head::Head;
@@ -167,7 +167,7 @@ async fn ready_app() -> axum::Router {
         panic!("not serve")
     };
     let mut layered = Layered::load(None, &BTreeMap::new()).expect("defaults");
-    let cfg: ServerConfig = build_config(&s, &mut layered).expect("config");
+    let cfg: ServerConfig = build_config_with(&s, &mut layered, || None).expect("config");
 
     let shared = Shared::new();
     let engine = Engine::spawn(

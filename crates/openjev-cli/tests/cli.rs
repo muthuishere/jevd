@@ -80,10 +80,37 @@ fn a_bad_config_file_is_exit_3_before_anything_expensive_happens() {
 
 #[test]
 fn a_non_loopback_bind_without_a_token_refuses_to_start() {
-    let (code, stdout, stderr) = run(&["serve", "--host", "0.0.0.0"]);
+    let out = openjev()
+        .args(["serve", "--host", "0.0.0.0"])
+        .env_remove("OPENJEV_TOKEN")
+        .env_remove("OPENJEV_API_KEY")
+        .output()
+        .expect("spawn");
+    let (code, stdout, stderr) = (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    );
     assert_eq!(code, 3);
     assert!(stderr.contains("refusing to serve"), "{stderr}");
     assert!(stdout.is_empty(), "a refusal writes nothing to stdout");
+}
+
+#[test]
+fn openjev_api_key_is_accepted_as_the_token() {
+    // "*" CORS is refused only once auth is on, before any model is touched: reaching that
+    // refusal instead of "refusing to serve" proves the alias was read as the token.
+    let out = openjev()
+        .args(["serve", "--host", "0.0.0.0", "--cors-origin", "*"])
+        .env_remove("OPENJEV_TOKEN")
+        .env("OPENJEV_API_KEY", "an-api-key-from-a-system-one-client")
+        .output()
+        .expect("spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(!stderr.contains("refusing to serve"), "{stderr}");
+    assert!(stderr.contains("cors_origins"), "{stderr}");
+    assert!(!stderr.contains("an-api-key-from-a-system-one-client"));
 }
 
 #[test]
