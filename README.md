@@ -56,6 +56,12 @@ curl -s http://127.0.0.1:21131/v1/systemone \
   }'
 ```
 
+**Illustrative response.** The shape is exactly what the server returns (pinned by
+`tests/systemone_e2e.rs` through the real router and worker); the numbers below are
+placeholders, not model output. No checkpoint has answered this request yet:
+`tests/systemone_live.rs` (`task systemone`) runs it against real weights and has not been
+run (STATUS.md).
+
 ```json
 {
   "model": "openjev",
